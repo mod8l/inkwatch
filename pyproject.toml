@@ -1,0 +1,29 @@
+[build-system]
+# >=83 avoids PYSEC-2026-3447 in the isolated build backend. This alone
+# does NOT fix it for an environment where setuptools is already
+# installed ambiently (e.g. a CI runner image) — that copy needs an
+# explicit `pip install --upgrade setuptools`, which is what actually
+# closes the pip-audit finding (see .github/workflows/tests.yml and
+# NOTES.md "Build-time decisions").
+requires = ["setuptools>=83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inkwatch"
+version = "0.1.0"
+description = "Play tic-tac-toe on paper against an agent that watches the page through a camera."
+requires-python = ">=3.11"
+dependencies = [
+    "opencv-contrib-python",
+    "numpy",
+    "pyyaml",
+    "pyttsx3",
+    "python-dotenv",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["inkwatch*"]

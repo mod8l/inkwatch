@@ -1,0 +1,10 @@
+.env
+sessions/
+recordings/
+assets/*.png
+assets/*.pdf
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
