@@ -1,8 +1,9 @@
-"""Tests for board rectification (PRODUCT.md P1, P2).
+"""Tests for board rectification (PRODUCT.md P1, P2) and per-cell ink
+measurement (P3, P4, D1).
 
-Builds a synthetic scene with the four corner markers placed at known
-positions and pushed through a perspective warp, so the expected result
-is known without a camera. This is the "replay test" M1 asks for.
+Builds synthetic scenes and rectified boards with known geometry and
+known ink coverage, so the expected result is known without a camera.
+This is the "replay test" the milestones ask for.
 """
 
 from __future__ import annotations
@@ -11,7 +12,16 @@ import cv2
 import numpy as np
 import pytest
 
-from inkwatch.perception import BoardTracker, CORNER_ROLES, compute_homography
+from inkwatch.perception import (
+    BoardTracker,
+    CORNER_ROLES,
+    cell_bounds,
+    classify_cell,
+    classify_cells,
+    compute_homography,
+    ink_ratio,
+    measure_cells,
+)
 
 DICTIONARY = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
@@ -130,3 +140,159 @@ def test_compute_homography_uses_the_board_facing_marker_corner():
     inward_point = detected[tl_marker_id][tl_corner_idx]
     mapped = cv2.perspectiveTransform(inward_point.reshape(1, 1, 2), homography)[0, 0]
     assert mapped == pytest.approx([0, 0], abs=2.0)
+
+
+# --- Per-cell ink measurement (P3, P4, D1) -------------------------------
+
+BOARD_SIZE = 600
+
+
+def make_synthetic_board(
+    size: int = BOARD_SIZE, marks: dict[int, float] | None = None
+) -> np.ndarray:
+    """A blank rectified board (grid lines only) with optional ink.
+
+    `marks` maps a cell index (0-8, row-major) to the fraction of that
+    cell's *inner* (inset) area to fill with a solid black square,
+    centered in the cell, standing in for a hand-drawn mark of known
+    coverage.
+    """
+    board = np.full((size, size, 3), 255, dtype=np.uint8)
+    cell = size // 3
+    for i in range(1, 3):
+        cv2.line(board, (i * cell, 0), (i * cell, size), (0, 0, 0), 2)
+        cv2.line(board, (0, i * cell), (size, i * cell), (0, 0, 0), 2)
+
+    bounds = cell_bounds(size)
+    for idx, coverage in (marks or {}).items():
+        x0, y0, x1, y1 = bounds[idx]
+        side_frac = coverage**0.5
+        fill_w = int(round((x1 - x0) * side_frac))
+        fill_h = int(round((y1 - y0) * side_frac))
+        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+        cv2.rectangle(
+            board,
+            (cx - fill_w // 2, cy - fill_h // 2),
+            (cx + fill_w // 2, cy + fill_h // 2),
+            (0, 0, 0),
+            -1,
+        )
+    return board
+
+
+def test_blank_board_reads_near_zero_ink_in_every_cell():
+    board = make_synthetic_board()
+
+    ratios = measure_cells(board)
+
+    assert len(ratios) == 9
+    assert all(r < 0.01 for r in ratios)
+
+
+def test_cell_bounds_are_inset_and_row_major():
+    bounds = cell_bounds(600, inset=0.15)
+
+    assert len(bounds) == 9
+    # Cell 0 is top-left; margin should shrink it in from the 0..200 raw cell.
+    x0, y0, x1, y1 = bounds[0]
+    assert x0 == pytest.approx(30, abs=1)
+    assert y0 == pytest.approx(30, abs=1)
+    assert x1 == pytest.approx(170, abs=1)
+    assert y1 == pytest.approx(170, abs=1)
+    # Cell 4 is the center cell.
+    cx0, cy0, cx1, cy1 = bounds[4]
+    assert cx0 == pytest.approx(230, abs=1)
+    assert cy0 == pytest.approx(230, abs=1)
+
+
+def test_grid_lines_alone_do_not_register_as_ink():
+    board = make_synthetic_board()  # grid only, no marks
+
+    ratios = measure_cells(board, inset=0.15)
+
+    assert max(ratios) < 0.01
+
+
+def test_heavy_mark_classified_as_marked_others_unaffected():
+    board = make_synthetic_board(marks={4: 0.6})
+
+    ratios = measure_cells(board)
+    marks = classify_cells(ratios, baseline=[0.0] * 9)
+
+    assert marks[4] == "marked"
+    assert all(m == "none" for i, m in enumerate(marks) if i != 4)
+
+
+def test_classification_uses_delta_from_baseline_not_raw_ratio():
+    """A cell whose baseline already carried that much ink (e.g. a
+    committed mark) should not re-trigger just because its raw ratio is
+    above the threshold (D1: it's the *delta* that's classified)."""
+    board = make_synthetic_board(marks={0: 0.5})
+    ratios = measure_cells(board)
+    baseline = list(ratios)  # baseline already matches current ink exactly
+
+    marks = classify_cells(ratios, baseline)
+
+    assert all(m == "none" for m in marks)
+
+
+def test_x_shaped_stroke_is_classified_marked():
+    """A more realistic mark than a filled square: two diagonal strokes,
+    like a hand-drawn X, still reads as ink."""
+    board = make_synthetic_board()
+    x0, y0, x1, y1 = cell_bounds(BOARD_SIZE)[4]
+    cv2.line(board, (x0, y0), (x1, y1), (0, 0, 0), 6)
+    cv2.line(board, (x1, y0), (x0, y1), (0, 0, 0), 6)
+
+    ratios = measure_cells(board)
+    result = classify_cell(ratios[4], baseline=0.0)
+
+    assert result == "marked"
+
+
+@pytest.mark.parametrize(
+    "cell,coverage,expected",
+    [
+        (0, 0.0, "none"),
+        (1, 0.0, "none"),
+        (2, 0.005, "none"),
+        (3, 0.01, "none"),
+        (4, 0.015, "none"),
+        (5, 0.018, "none"),
+        (6, 0.025, "ambiguous"),
+        (7, 0.03, "ambiguous"),
+        (8, 0.035, "ambiguous"),
+        (0, 0.04, "ambiguous"),
+        (1, 0.045, "ambiguous"),
+        (2, 0.048, "ambiguous"),
+        (3, 0.06, "marked"),
+        (4, 0.08, "marked"),
+        (5, 0.1, "marked"),
+        (6, 0.2, "marked"),
+        (7, 0.3, "marked"),
+        (8, 0.5, "marked"),
+        (0, 0.7, "marked"),
+        (1, 0.9, "marked"),
+    ],
+)
+def test_twenty_synthetic_marks_classify_correctly(cell, coverage, expected):
+    """Stands in for PRODUCT.md M2's '20 manual marks' acceptance check:
+    20 marks of known coverage, spread across cells and across the
+    none/ambiguous/marked bands defined by the default thresholds
+    (ink_threshold_low=0.02, ink_threshold_high=0.05 in config.yaml).
+    """
+    board = make_synthetic_board(marks={cell: coverage} if coverage else None)
+
+    ratios = measure_cells(board)
+    result = classify_cell(ratios[cell], baseline=0.0)
+
+    assert result == expected
+
+
+def test_ink_ratio_accepts_grayscale_or_color_crop():
+    board = make_synthetic_board(marks={4: 0.5})
+    x0, y0, x1, y1 = cell_bounds(BOARD_SIZE)[4]
+    color_crop = board[y0:y1, x0:x1]
+    gray_crop = cv2.cvtColor(color_crop, cv2.COLOR_BGR2GRAY)
+
+    assert ink_ratio(color_crop) == pytest.approx(ink_ratio(gray_crop), abs=1e-6)
