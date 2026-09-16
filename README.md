@@ -13,6 +13,7 @@ You draw every mark, yours and the agent's. The agent notices your move on its o
 | [`NOTES.md`](NOTES.md) | Decisions and why, known limits, how AI tools were used |
 | [`AGENTS.md`](AGENTS.md) | Branch, PR, test, and review workflow |
 | [`CODE_REVIEW.md`](CODE_REVIEW.md) | Review checklist: spec, hard rules, security, tests |
+| [`COMPLIANCE.md`](COMPLIANCE.md) | SOC 2 / ISO 27001 gap analysis and readiness notes |
 
 ---
 

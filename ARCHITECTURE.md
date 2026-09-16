@@ -97,3 +97,5 @@ New games ship as a rules module plus perception spec. Natural-language rules ca
 4. **Model gateway latency or outage.** 3 s timeout and per-game budget (built); circuit breaker and second vendor (designed). Either way, fall back to asking the human. Signal: p95 escalation latency, breaker trips.
 5. **Cost runaway** in bad lighting (escalation storm). Per-session escalation budget. Signal: spend per game.
 6. **Generalization limit.** The "new ink appeared" assumption breaks for games where pieces move or are removed (chess, checkers). Those need a full region-state perception spec and a VLM or detector per read; this is the main cost of going game-agnostic.
+
+Security/compliance posture for a hosted version of this diagram (auth on the Session service, vendor review of the Model gateway's downstream provider, retention on the Event log) is tracked separately in `COMPLIANCE.md`, to keep this page to the flow/services/failure it's scoped to.

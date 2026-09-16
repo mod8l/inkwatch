@@ -152,6 +152,7 @@ In priority order, if this became a real product:
 3. **Marker-free board finding** as a second path, so a hand-drawn grid works.
 4. **Split perception and session into separate processes** with the `Observation` event as the wire contract, as in the architecture page.
 5. **Second game with removals** (e.g. checkers) to force the region-state perception spec and prove the game-agnostic boundary is real rather than drawn.
+6. **SOC 2 / ISO 27001 readiness** if this ever became a hosted, multi-tenant product — see `COMPLIANCE.md` for the gap analysis against both frameworks and the prioritized list of design changes that would actually matter (auth design for the per-tenant session service, vendor review of the model gateway's downstream provider, a real retention policy for `sessions/`). Explicitly not built now: `PRODUCT.md`'s non-goals rule out a hosted service for this take-home, and compliance is an audited property of an organization over time, not something a repo can claim on its own.
 
 ---
 
