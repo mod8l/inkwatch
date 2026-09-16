@@ -11,6 +11,8 @@ You draw every mark, yours and the agent's. The agent notices your move on its o
 | [`PRODUCT.md`](PRODUCT.md) | What it does, requirements, edge cases, metrics |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | One-page design for a game-agnostic version |
 | [`NOTES.md`](NOTES.md) | Decisions and why, known limits, how AI tools were used |
+| [`AGENTS.md`](AGENTS.md) | Branch, PR, test, and review workflow |
+| [`CODE_REVIEW.md`](CODE_REVIEW.md) | Review checklist: spec, hard rules, security, tests |
 
 ---
 

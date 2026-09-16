@@ -77,6 +77,12 @@ TODO: add entries as they happen, same format. Likely candidates: threshold cali
 - **Why:** inner corners give a tighter, more precise fit for the grid PRODUCT.md's ink measurement (M2) will run on; centers would leave the rectified crop's exact framing dependent on marker size relative to the board, which is fiddly to keep aligned with the grid drawn on the sheet.
 - **Would change if:** markers are frequently partially occluded near their inner corner specifically (center would be more robust to that one failure mode).
 
+#### Process: AGENTS.md, CODE_REVIEW.md, and CI added alongside the milestone work
+- **Chosen:** a separate `AGENTS.md` (branch/PR/test workflow) and `CODE_REVIEW.md` (review checklist: spec conformance, the `CLAUDE.md` hard rules, security, tests, docs, style), plus a minimal GitHub Actions workflow (`.github/workflows/tests.yml`) that runs `pytest` on every push/PR to `main`.
+- **Considered:** folding this into `CLAUDE.md` itself.
+- **Why separate files:** `CLAUDE.md` is the fixed build brief (what to build, milestone process); the git/PR/CI mechanics and the review checklist are a different concern read at a different time (opening a PR, reviewing one) and change on a different cadence, so keeping them apart avoids either doc growing unfocused.
+- **Would change if:** Gad wants this folded into one doc, or wants GitHub branch protection actually turned on (that's a repo Settings change, not a file — noted as not-yet-done in `AGENTS.md`, needs someone with admin access to flip it).
+
 #### M1.3 BOARD_LOST hold-over is a perception-layer concern, session state machine not built yet
 - `BoardTracker.update()` implements P1/P2 directly: it returns `found=False` once the 0.5 s hold window (`hold_seconds`) expires with fewer than 4 markers. The actual `BOARD_LOST` / `RESYNC` states in PRODUCT.md §8 belong to `session.py`, which isn't built yet (that's M3/M4). For now `tools/calibrate.py` just prints the found/lost status directly.
 
