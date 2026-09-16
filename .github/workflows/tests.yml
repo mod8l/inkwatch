@@ -5,16 +5,33 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
+
+# Least-privilege default: no job needs to write to the repo or its checks.
+permissions:
+  contents: read
+
+# A new push to the same PR cancels the previous run instead of queuing
+# behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pytest:
+    name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
 
       # opencv-contrib-python needs these at import time even in a
       # headless CI runner (no cv2.imshow is called by the test suite).
@@ -26,3 +43,39 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+  dependency-audit:
+    name: dependency vulnerability scan (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install package + pip-audit
+        run: pip install -e . pip-audit
+
+      # Audits the resolved environment (this repo's dependency tree),
+      # not just what's pinned in pyproject.toml.
+      - name: Run pip-audit
+        run: pip-audit
+
+  static-security-scan:
+    name: static security scan (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install bandit
+        run: pip install bandit
+
+      - name: Run bandit
+        run: bandit -r inkwatch tools

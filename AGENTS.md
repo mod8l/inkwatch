@@ -57,9 +57,17 @@ or an AI coding agent alike.
   `tests/test_perception.py` for the pattern), so the geometry/threshold
   logic is still checked by CI even though the actual camera/lighting
   behavior can't be.
-- CI (`.github/workflows/tests.yml`) runs the full `pytest` suite on
-  every push and on every PR targeting `main`. A PR shouldn't merge with
-  a red check.
+- CI (`.github/workflows/tests.yml`) runs on every push and every PR
+  targeting `main`, as three separate checks — a PR shouldn't merge with
+  any of them red:
+  - `pytest (py3.11)` / `pytest (py3.12)` — the full test suite, matrixed
+    across both supported Python versions.
+  - `dependency vulnerability scan (pip-audit)` — audits the resolved
+    dependency tree, not just what's pinned in `pyproject.toml`.
+  - `static security scan (bandit)` — a Python SAST pass over `inkwatch/`
+    and `tools/`.
+- Once branch protection is turned on (see "Not yet set up" below), these
+  are the checks to mark required.
 
 ## Code review
 

@@ -83,6 +83,13 @@ TODO: add entries as they happen, same format. Likely candidates: threshold cali
 - **Why separate files:** `CLAUDE.md` is the fixed build brief (what to build, milestone process); the git/PR/CI mechanics and the review checklist are a different concern read at a different time (opening a PR, reviewing one) and change on a different cadence, so keeping them apart avoids either doc growing unfocused.
 - **Would change if:** Gad wants this folded into one doc, or wants GitHub branch protection actually turned on (that's a repo Settings change, not a file — noted as not-yet-done in `AGENTS.md`, needs someone with admin access to flip it).
 
+#### Process: CI now runs a Python version matrix, pip-audit, and bandit; a real CVE was fixed
+- **Chosen:** split CI into three required checks — `pytest` matrixed over Python 3.11/3.12, `pip-audit` (dependency vulnerability scan / SCA), and `bandit` (SAST) — plus least-privilege `permissions: contents: read` and a `concurrency` group so a new push cancels a stale run.
+- **Considered:** leaving dependency/static-analysis scanning as a documented gap only (as the first cut of `COMPLIANCE.md` did).
+- **Why:** these are ephemeral CI-only tools (installed inside the runner, never added to `pyproject.toml`'s `dependencies`), so they don't touch the approved runtime stack `CLAUDE.md` gates — closing two of `COMPLIANCE.md`'s SDLC gaps at effectively no cost.
+- **What happened running it:** `pip-audit` found a real, live vulnerability — `PYSEC-2026-3447` in `setuptools` 79.0.1 (a build-time dependency, not one of the app's runtime deps) — before the check was ever wired into CI. Fixed by pinning `setuptools>=83` in `pyproject.toml`'s `[build-system]`; confirmed clean with a second `pip-audit` run. `bandit -r inkwatch tools` was clean on the first run (256 lines scanned at the time, M1's `perception.py` plus the two `tools/` scripts).
+- **Would change if:** a future dependency legitimately can't be upgraded past a flagged version (e.g. no fix released yet) — then the specific finding gets an explicit, commented suppression in the workflow rather than turning the whole check off.
+
 #### M1.3 BOARD_LOST hold-over is a perception-layer concern, session state machine not built yet
 - `BoardTracker.update()` implements P1/P2 directly: it returns `found=False` once the 0.5 s hold window (`hold_seconds`) expires with fewer than 4 markers. The actual `BOARD_LOST` / `RESYNC` states in PRODUCT.md §8 belong to `session.py`, which isn't built yet (that's M3/M4). For now `tools/calibrate.py` just prints the found/lost status directly.
 
