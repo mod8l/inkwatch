@@ -1,17 +1,22 @@
-"""Board location and rectification.
+"""Board location, rectification, and per-cell ink measurement.
 
 Finds the four ArUco corner markers, computes the homography from the
 inner (board-facing) marker corners to a fixed-size top-down image, and
-warps the frame. Implements PRODUCT.md P1 and P2.
+warps the frame (P1, P2). Divides the rectified board into 9 inset cells
+and measures ink per cell against an accepted baseline (P3, P4, D1).
 
-Perception never mutates game state; it only ever hands back pixels and
-geometry. Move detection (ink per cell) is a separate module (M2).
+Perception never mutates game state; it only ever hands back pixels,
+geometry, and per-cell measurements. Stability gating (P5, P6), the
+confidence rules that turn a classification into an accepted move (D2,
+D3), and everything downstream of that live in the session state machine
+(M3+), not here.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -32,6 +37,12 @@ CORNER_ROLES: dict[str, tuple[int, int]] = {
 DEFAULT_DICTIONARY = cv2.aruco.DICT_4X4_50
 DEFAULT_OUTPUT_SIZE = 600
 DEFAULT_HOLD_SECONDS = 0.5
+
+DEFAULT_CELL_INSET = 0.15
+DEFAULT_INK_LOW = 0.02
+DEFAULT_INK_HIGH = 0.05
+
+CellMark = Literal["none", "ambiguous", "marked"]
 
 
 @dataclass
@@ -85,6 +96,79 @@ def compute_homography(
     )
     homography = cv2.getPerspectiveTransform(src, dst)
     return homography, []
+
+
+def cell_bounds(
+    size: int, inset: float = DEFAULT_CELL_INSET
+) -> list[tuple[int, int, int, int]]:
+    """Inner-cell (x0, y0, x1, y1) box for each of the 9 cells.
+
+    Row-major, top-left to bottom-right. Each cell is shrunk by `inset`
+    on every side so the grid lines drawn on the sheet don't count as
+    ink (P3).
+    """
+    cell = size / 3
+    margin = cell * inset
+    bounds = []
+    for row in range(3):
+        for col in range(3):
+            x0 = col * cell + margin
+            y0 = row * cell + margin
+            x1 = (col + 1) * cell - margin
+            y1 = (row + 1) * cell - margin
+            bounds.append((round(x0), round(y0), round(x1), round(y1)))
+    return bounds
+
+
+def ink_ratio(cell_image: np.ndarray) -> float:
+    """Fraction of dark (ink) pixels in a cell crop.
+
+    Adaptive thresholding rather than a single global cutoff, so uneven
+    lighting across the page doesn't bias one cell against another (P4).
+    """
+    gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY) if cell_image.ndim == 3 else cell_image
+    h, w = gray.shape[:2]
+    block_size = max(3, (min(h, w) // 2) | 1)  # odd, roughly half the cell
+    dark = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        block_size,
+        5,
+    )
+    return float(np.count_nonzero(dark)) / dark.size
+
+
+def measure_cells(rectified: np.ndarray, inset: float = DEFAULT_CELL_INSET) -> list[float]:
+    """Ink ratio for each of the 9 cells, row-major (P3, P4)."""
+    size = rectified.shape[0]
+    return [ink_ratio(rectified[y0:y1, x0:x1]) for x0, y0, x1, y1 in cell_bounds(size, inset)]
+
+
+def classify_cell(
+    ratio: float,
+    baseline: float,
+    low: float = DEFAULT_INK_LOW,
+    high: float = DEFAULT_INK_HIGH,
+) -> CellMark:
+    """Classify one cell's ink delta against its accepted baseline (D1)."""
+    delta = ratio - baseline
+    if delta >= high:
+        return "marked"
+    if delta >= low:
+        return "ambiguous"
+    return "none"
+
+
+def classify_cells(
+    ratios: list[float],
+    baseline: list[float],
+    low: float = DEFAULT_INK_LOW,
+    high: float = DEFAULT_INK_HIGH,
+) -> list[CellMark]:
+    """Classify all 9 cells against their per-cell baselines (D1)."""
+    return [classify_cell(r, b, low, high) for r, b in zip(ratios, baseline)]
 
 
 class BoardTracker:

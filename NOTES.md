@@ -101,6 +101,19 @@ TODO: add entries as they happen, same format. Likely candidates: threshold cali
 #### M1.3 BOARD_LOST hold-over is a perception-layer concern, session state machine not built yet
 - `BoardTracker.update()` implements P1/P2 directly: it returns `found=False` once the 0.5 s hold window (`hold_seconds`) expires with fewer than 4 markers. The actual `BOARD_LOST` / `RESYNC` states in PRODUCT.md §8 belong to `session.py`, which isn't built yet (that's M3/M4). For now `tools/calibrate.py` just prints the found/lost status directly.
 
+#### M2.1 Ink measurement stays in `perception.py`; classification takes an explicit baseline, doesn't own one
+- **Chosen:** `cell_bounds`, `ink_ratio`, `measure_cells`, `classify_cell`, `classify_cells` all added to `perception.py` per `PRODUCT.md` §14's own layout comment (`perception.py # markers, homography, stability, per-cell ink`), rather than a new module. Adaptive thresholding (`cv2.adaptiveThreshold`, Gaussian, block size ~half the cell) rather than a single global cutoff, so uneven lighting across the page doesn't bias one cell against another. `classify_cell`/`classify_cells` take the baseline ratio(s) as a plain argument; they don't store or own a baseline themselves.
+- **Considered:** giving `BoardTracker` (or a new class) ownership of the "accepted baseline" mentioned in P4/D7.
+- **Why not:** the baseline is session state — it changes only when `session.py` commits a move (D7) — and perception must never own game state (`CLAUDE.md` hard rule). Keeping `classify_cell` a pure function of `(ratio, baseline, low, high)` means the baseline can live in `session.py` once it exists, without perception needing to change.
+- **Would change if:** M3 finds passing 9 baseline floats around every frame awkward; a small `Baseline` dataclass could wrap the list without changing where it's owned.
+
+#### M2.2 `tools/calibrate.py` overlays raw ink ratios, not baseline-relative classification
+- **Chosen:** the rectified view now draws each cell's inset box and its live `ink_ratio` (a plain number), matching the check `README.md` §4 already described ("a small ink number in each cell... draw a test mark, its number should jump").
+- **Considered:** wiring in `classify_cell` against a snapshot-the-blank-board-as-baseline captured on a keypress, so the tool shows none/ambiguous/marked directly.
+- **Why not now:** that needs a per-cell baseline and a capture UX, which is session-state territory (`session.py`, M3) rather than a debug tool's job; the raw-ratio view is what the setup check actually needs (numbers near zero, one jumps on a mark) and needed no new concepts.
+- **Would change if:** manual testing on the real camera (`tools/calibrate.py`, 20 marks against `PRODUCT.md`'s M2 acceptance bar) shows raw ratios aren't legible enough to judge by eye; then add the baseline-snapshot + classify overlay.
+- **Tuned value:** TODO — `ink_threshold_low`/`ink_threshold_high`/`cell_inset` as actually confirmed against the real camera and pen (currently the `config.yaml` defaults, unverified beyond synthetic tests).
+
 ---
 
 ## 3. What I tried and dropped
