@@ -38,6 +38,13 @@ jobs:
       - name: Install OpenCV runtime libraries
         run: sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0
 
+      # The runner image ships its own (often stale) pip/setuptools ahead
+      # of anything this repo controls; pyproject.toml's [build-system]
+      # pin only reaches the isolated build backend, not this ambient
+      # copy, so it has to be upgraded explicitly.
+      - name: Upgrade pip and setuptools
+        run: pip install --upgrade pip setuptools
+
       # Deliberately unpinned (pyproject.toml has no upper bounds): this
       # job is the early-warning signal for a breaking upstream release,
       # separate from the "does the pinned lockfile still work" job below.
@@ -60,6 +67,9 @@ jobs:
 
       - name: Install OpenCV runtime libraries
         run: sudo apt-get update && sudo apt-get install -y libgl1 libglib2.0-0
+
+      - name: Upgrade pip and setuptools
+        run: pip install --upgrade pip setuptools
 
       - name: Install pip-tools
         run: pip install pip-tools
@@ -95,6 +105,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+
+      - name: Upgrade pip and setuptools
+        run: pip install --upgrade pip setuptools
 
       # Audits the exact pinned/reproducible dependency set, not whatever
       # happens to resolve as "latest" on a given day.

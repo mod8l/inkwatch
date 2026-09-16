@@ -1,5 +1,10 @@
 [build-system]
-# >=83 fixes PYSEC-2026-3447 (found by pip-audit; see COMPLIANCE.md §3).
+# >=83 avoids PYSEC-2026-3447 in the isolated build backend. This alone
+# does NOT fix it for an environment where setuptools is already
+# installed ambiently (e.g. a CI runner image) — that copy needs an
+# explicit `pip install --upgrade setuptools`, which is what actually
+# closes the pip-audit finding (see .github/workflows/tests.yml and
+# NOTES.md "Build-time decisions").
 requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
