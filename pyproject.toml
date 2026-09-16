@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inkwatch"
+version = "0.1.0"
+description = "Play tic-tac-toe on paper against an agent that watches the page through a camera."
+requires-python = ">=3.11"
+dependencies = [
+    "opencv-contrib-python",
+    "numpy",
+    "pyyaml",
+    "pyttsx3",
+    "python-dotenv",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["inkwatch*"]
