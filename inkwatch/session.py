@@ -15,20 +15,21 @@ or no API key". When M5 adds a real model call, it plugs into
 `_resolve_escalate` and only takes the fallback path when the model
 disagrees or times out.
 
-Two deliberate divergences from a literal reading of §8, flagged here per
-CLAUDE.md ("stop and say so") for Gad's milestone review rather than
-silently changed in PRODUCT.md:
-- §8 only draws `RESYNC --> WAIT_HUMAN`. If the board was lost mid
-  `WAIT_AGENT_INK` (the agent's move already armed), resuming into
-  `WAIT_HUMAN` would silently drop the armed turn and wait on the wrong
-  side. `_resume_after_resync` instead resumes whichever phase matches
-  whose turn it already was, re-arming the same target cell rather than
-  picking a new one.
-- §8 doesn't draw `CALIBRATING --> BOARD_LOST` as ever firing before the
-  first board is found — there's no committed state to lose yet, and
-  `__main__.py`'s "board not found" banner already covers that wait. This
-  build treats CALIBRATING as immune to BOARD_LOST; it just keeps waiting,
-  same as M3.
+If the board was lost mid `WAIT_AGENT_INK` (the agent's move already
+armed), `_resume_after_resync` resumes whichever phase matches whose turn
+it already was, re-arming the same target cell rather than picking a new
+one — resuming into `WAIT_HUMAN` unconditionally would silently drop the
+armed turn and wait on the wrong side. Flagged per CLAUDE.md ("stop and
+say so") and confirmed with Gad; `PRODUCT.md` §8's diagram and prose are
+updated in the same commit to draw `RESYNC --> WAIT_AGENT_INK` alongside
+`RESYNC --> WAIT_HUMAN`, so this is no longer a divergence from the doc.
+
+One divergence is still just noted, not yet raised as its own question:
+§8 doesn't draw `CALIBRATING --> BOARD_LOST` as ever firing before the
+first board is found — there's no committed state to lose yet, and
+`__main__.py`'s "board not found" banner already covers that wait. This
+build treats CALIBRATING as immune to BOARD_LOST; it just keeps waiting,
+same as M3. See NOTES.md.
 
 Also cut from M4, tracked in NOTES.md rather than built: keyboard `y`/`n`
 as the "last resort" answer channel `ARCHITECTURE.md` describes. Every

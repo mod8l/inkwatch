@@ -161,12 +161,13 @@ stateDiagram-v2
   WAIT_HUMAN --> BOARD_LOST: markers missing > 0.5 s
   WAIT_AGENT_INK --> BOARD_LOST: markers missing > 0.5 s
   BOARD_LOST --> RESYNC: board found again
-  RESYNC --> WAIT_HUMAN: page matches state
+  RESYNC --> WAIT_HUMAN: page matches state, human's turn
+  RESYNC --> WAIT_AGENT_INK: page matches state, agent's turn
   RESYNC --> ASK_HUMAN: page differs from state
   GAME_OVER --> [*]
 ```
 
-`RESYNC` re-reads all nine cells after the page moves or is lost, because the baseline is no longer trustworthy.
+`RESYNC` re-reads all nine cells after the page moves or is lost, because the baseline is no longer trustworthy. It resumes whichever side's turn it already was — if the board was lost mid-`WAIT_AGENT_INK`, the agent's move is still armed and unconfirmed, so RESYNC re-arms the *same* target cell rather than picking a new one or waiting on the human for a move that isn't theirs to make.
 
 ## 9. Edge cases and required behavior
 
