@@ -80,7 +80,7 @@ The agent says *"I can see the board. You're X, you go first."* Then:
 1. Draw an **X** in any cell and move your hand away.
 2. The agent says which cell you played and where it will play, e.g. *"You played center. I'll take top left. Please draw an O there."*
 3. Draw the **O** where it asked. It confirms and it's your turn again.
-4. At the end it announces the result. (The re-read that checks the final page still matches its report is M4/G5 — not built yet; see `NOTES.md`.)
+4. At the end it announces the result, then re-reads the whole page once more (G5) — if it disagrees with what it just reported, it says so and names the cell.
 
 Cells are named by row (**top / middle / bottom**) and column (**left / center / right**). The middle cell is just **center**. The target cell is also highlighted on screen.
 
@@ -92,9 +92,9 @@ Cells are named by row (**top / middle / bottom**) and column (**left / center /
 |---|---|---|
 | `q` | Quit | Yes |
 | `d` | Toggle debug overlay (per-cell none/ambiguous/marked) | Yes |
-| `n` | New game (use a fresh sheet) | Not yet (M4) |
-| `r` | Force a full re-read of the board | Not yet (M4) |
-| `y` / `n` | Answer the agent's question, if it asks one you can't resolve on the page | Not yet (M4/M5) |
+| `n` | New game (use a fresh sheet) | Yes |
+| `r` | Force a full re-read of the board (RESYNC) | Yes |
+| `y` / spoken answer | Answer the agent's question, if it asks one you can't resolve on the page | Not built — deferred; see `NOTES.md`. Every question the agent can currently ask resolves through the page instead: fix what's on paper and the next stable read confirms or clears it. |
 
 ## Options
 
@@ -103,7 +103,7 @@ python -m inkwatch --agent-first        # agent plays X and opens
 python -m inkwatch --camera 1           # pick another camera index
 python -m inkwatch --camera <url>       # IP camera / phone stream
 python -m inkwatch --no-voice           # display only
-python -m inkwatch --no-escalation      # never call the vision model (currently the only mode there is; escalation is M5)
+python -m inkwatch --no-escalation      # never call the vision model (a no-op for now: escalation.py is M5, every low-confidence read already asks you directly)
 python -m inkwatch --record             # save the raw stream for replay (accepted but not yet built, M5)
 ```
 
