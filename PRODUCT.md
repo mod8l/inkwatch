@@ -256,7 +256,7 @@ Eval set: at least 10 recorded games including deliberate edge cases (two marks,
 - [ ] Video includes at least one recovery (e.g., ambiguous or wrong-cell mark handled correctly).
 - [ ] Game fully playable with escalation disabled.
 - [ ] README gets a stranger to a running game in under ten minutes.
-- [ ] Rules and decision modules covered by unit tests; perception covered by at least one replay test.
+- [x] Rules and decision modules covered by unit tests; perception covered by at least one replay test (`tests/test_replay.py`, M5).
 - [ ] No secrets committed.
 - [ ] `ARCHITECTURE.md` one page, covering flow, services, shared vs per-tenant, failure.
 - [ ] Known limits documented honestly.

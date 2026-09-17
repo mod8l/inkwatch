@@ -103,8 +103,8 @@ python -m inkwatch --agent-first        # agent plays X and opens
 python -m inkwatch --camera 1           # pick another camera index
 python -m inkwatch --camera <url>       # IP camera / phone stream
 python -m inkwatch --no-voice           # display only
-python -m inkwatch --no-escalation      # never call the vision model (a no-op for now: escalation.py is M5, every low-confidence read already asks you directly)
-python -m inkwatch --record             # save the raw stream for replay (accepted but not yet built, M5)
+python -m inkwatch --no-escalation      # never call the vision model, even with an API key set -- every low-confidence read asks you directly
+python -m inkwatch --record             # save every raw camera frame + a manifest under sessions/<id>/, for replay later
 ```
 
 All defaults live in [`config.yaml`](config.yaml).
@@ -140,9 +140,16 @@ A phone on a gooseneck or propped on a glass above the desk gives the best angle
 pytest
 ```
 
-Covers rules, decision (the agent never loses, proved exhaustively), board rectification and ink detection on synthetic frames, the TTS queue, and the session state machine driven with synthetic observations — all camera-free.
+Covers rules, decision (the agent never loses, proved exhaustively), board rectification and ink detection on synthetic frames, the TTS queue, the session state machine driven with synthetic observations, the escalation call against a mocked model, and a synthetic recording run through the replay pipeline — all camera-free.
 
-Recording and replay (`--record`, `python -m inkwatch.replay`) aren't built yet — that's M5. Once they are: replay re-runs perception + session on a saved stream without a camera, writing a fresh event log you can diff against the original, which is how threshold changes get checked against the same frames instead of new, uncontrolled games.
+Every game writes a JSONL event log to `sessions/<timestamp>/events.jsonl` (commits, questions, escalations with latency/cost, the final result), plus a snapshot frame at each of those moments under `sessions/<timestamp>/frames/`. Add `--record` to also save every raw camera frame + `manifest.jsonl` under `sessions/<timestamp>/raw/`, then replay it without a camera:
+
+```bash
+python -m inkwatch --record             # play a game; note the printed session timestamp
+python -m inkwatch.replay sessions/<timestamp>
+```
+
+This re-runs perception + session (+ escalation, if a key is set) over the exact same frames and writes `sessions/<timestamp>/replay.jsonl` — diff it against `events.jsonl`, or re-run with different `--ink-low`/`--ink-high`/`--stability-frames` to check a threshold change against a real, already-played game instead of a fresh, uncontrolled one.
 
 ## Measured results
 
