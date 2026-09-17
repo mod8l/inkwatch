@@ -16,7 +16,7 @@ import pytest
 from inkwatch.perception import DEFAULT_OUTPUT_SIZE, Perceiver, cell_bounds
 from inkwatch.replay import load_manifest, replay_session, run_frame
 from inkwatch.session import Phase, Session
-from tests.test_perception import BOARD_ORIGIN, BOARD_SIDE, MARKER_SIDE, make_synthetic_frame
+from test_perception import BOARD_ORIGIN, BOARD_SIDE, MARKER_SIDE, make_synthetic_frame
 
 RAW_GRID_ORIGIN = (BOARD_ORIGIN[0] + MARKER_SIDE, BOARD_ORIGIN[1] + MARKER_SIDE)
 RAW_GRID_SIDE = BOARD_SIDE - 2 * MARKER_SIDE
