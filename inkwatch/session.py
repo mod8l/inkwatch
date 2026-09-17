@@ -8,12 +8,20 @@ and `ASK_HUMAN`. `EVALUATE` and `THINK` still have no external input of
 their own, so (per M3) they stay folded into the same `update()` call
 rather than persisted as their own resting phase.
 
-`ESCALATE` has no vision model wired in yet (that's M5's `escalation.py`)
-— it always falls straight through to `ASK_HUMAN` on the next `update()`
-call, which is exactly the §9 behavior specified for "vision model timeout
-or no API key". When M5 adds a real model call, it plugs into
-`_resolve_escalate` and only takes the fallback path when the model
-disagrees or times out.
+M5 wires in the real vision-model call (D4), but `session.py` still never
+touches the network or a rectified crop — that stays `escalation.py`'s
+job, called by `__main__.py`/`replay.py`. The flow: entering `ESCALATE`
+(`_enter_escalate`) is a silent one-beat phase, same shape as M4; the
+caller is expected to see `phase == ESCALATE`, look at `escalation_cells`
+on the `SessionResult`, run the actual model call, and hand the result to
+`apply_escalation` before the next frame. `update()` itself still
+auto-resolves ESCALATE with a "no answer" outcome if it's ever still
+sitting there on a later call — a safety net for a caller that doesn't
+wire escalation in at all, so the session can never get stuck waiting.
+`_resolve_escalate` accepts the model's cell only if it's one perception
+already flagged (D5 "consistent with the ink data"); anything else —
+disagreement, timeout, no key, budget spent — asks the human, exactly
+M4's fallback.
 
 If the board was lost mid `WAIT_AGENT_INK` (the agent's move already
 armed), `_resume_after_resync` resumes whichever phase matches whose turn
@@ -45,7 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from inkwatch.events import CellMark, Observation
+from inkwatch.events import CellMark, EscalationOutcome, Observation
 from inkwatch.decision import best_move
 from inkwatch.output import cell_name, describe_line
 from inkwatch.rules import EMPTY_BOARD, Board, Symbol, apply_move, is_draw, winner
@@ -92,6 +100,10 @@ class SessionResult:
     target_cell: int | None
     confidence: str  # "accepted" | "escalating" | "asking" (§6.5)
     cell_marks: tuple[CellMark, ...] | None
+    # The cells a live ESCALATE phase wants a vision-model opinion on,
+    # for the caller to run the actual model call against (M5). Empty
+    # outside ESCALATE.
+    escalation_cells: frozenset[int]
 
 
 def _new_marks(cell_marks: tuple[CellMark, ...], board: Board) -> tuple[list[int], list[int], list[int]]:
@@ -154,6 +166,10 @@ class Session:
         # the question: "two_marks" | "ambiguous" | "wrong_cell" | "resync".
         self._ask_context: str | None = None
         self._ask_cells: frozenset[int] = frozenset()
+        # The ratios from the observation that triggered the current
+        # ESCALATE, so a later accepted answer has something to commit
+        # with — apply_escalation() isn't observation-driven itself.
+        self._ask_ratios: tuple[float, ...] | None = None
 
         # Debounce state (D6-style: two consecutive matching stable reads)
         # for each recovery check, kept separate so an ambiguous flicker on
@@ -167,29 +183,36 @@ class Session:
 
     def update(self, observation: Observation, now: float) -> SessionResult:
         if self.phase == Phase.CALIBRATING:
-            return self._result(observation, self._handle_calibrating(observation, now))
+            return self._result(observation.cell_marks, self._handle_calibrating(observation, now))
 
         if self.phase == Phase.GAME_OVER:
-            return self._result(observation, None)
+            return self._result(observation.cell_marks, None)
 
         # P2's hold-over already covers a brief marker dropout at the
         # perception layer; once it reports not-found, the board is really
         # gone regardless of what this phase was doing (§8: BOARD_LOST).
         if not observation.found and self.phase != Phase.BOARD_LOST:
-            return self._result(observation, self._enter_board_lost())
+            return self._result(observation.cell_marks, self._enter_board_lost())
 
         if self.phase == Phase.BOARD_LOST:
             message = self._enter_resync() if observation.found else None
-            return self._result(observation, message)
+            return self._result(observation.cell_marks, message)
 
         if self.phase == Phase.RESYNC:
             message = None
             if observation.stable and observation.ratios is not None:
                 message = self._handle_resync(observation, now)
-            return self._result(observation, message)
+            return self._result(observation.cell_marks, message)
 
         if self.phase == Phase.ESCALATE:
-            return self._result(observation, self._resolve_escalate())
+            # Safety net only (M5): the caller (__main__.py/replay.py) is
+            # expected to have already run the real model call and passed
+            # its result to apply_escalation() before the next frame, using
+            # this same beat's `escalation_cells`. If that didn't happen —
+            # no escalator wired in, or a bug — don't sit here forever;
+            # resolve with a "no answer" outcome, same as a real timeout.
+            fallback = EscalationOutcome(cell=None, error="not_applied", latency_s=0.0, cost=0.0)
+            return self._result(observation.cell_marks, self._resolve_escalate(fallback, now))
 
         message = None
         if self.phase == Phase.WAIT_AGENT_INK:
@@ -205,7 +228,17 @@ class Session:
             elif self.phase == Phase.ASK_HUMAN:
                 message = self._handle_ask_human(observation, now) or message
 
-        return self._result(observation, message)
+        return self._result(observation.cell_marks, message)
+
+    def apply_escalation(self, outcome: EscalationOutcome, now: float) -> SessionResult:
+        """M5: `__main__.py`/`replay.py` call this with the real vision-
+        model result for the ESCALATE beat `update()` just returned,
+        before reading the next frame. A no-op (returns the current state
+        untouched) if the session has already moved on for some other
+        reason — never lets a stale answer overwrite whatever's current."""
+        if self.phase != Phase.ESCALATE:
+            return self._result(None, None)
+        return self._result(None, self._resolve_escalate(outcome, now))
 
     def force_resync(self) -> None:
         """README's `r` key: manually trigger the same full-board re-read
@@ -216,7 +249,7 @@ class Session:
             self._ask_context = None
             self._reset_recovery_debounce()
 
-    def _result(self, observation: Observation, message: str | None) -> SessionResult:
+    def _result(self, cell_marks: tuple[CellMark, ...] | None, message: str | None) -> SessionResult:
         return SessionResult(
             phase=self.phase,
             board=self.board,
@@ -224,7 +257,8 @@ class Session:
             message=message,
             target_cell=self.target_cell,
             confidence=_CONFIDENCE_BY_PHASE.get(self.phase, "accepted"),
-            cell_marks=observation.cell_marks,
+            cell_marks=cell_marks,
+            escalation_cells=self._ask_cells if self.phase == Phase.ESCALATE else frozenset(),
         )
 
     # -- CALIBRATING ---------------------------------------------------
@@ -315,17 +349,25 @@ class Session:
 
     # -- ESCALATE ---------------------------------------------------------
 
-    def _enter_escalate(self, situation: str, cells: frozenset[int]) -> None:
+    def _enter_escalate(self, situation: str, cells: frozenset[int], ratios: tuple[float, ...]) -> None:
         self.phase = Phase.ESCALATE
         self._ask_context = situation
         self._ask_cells = cells
+        self._ask_ratios = ratios
         self._pending_cell = None
         return None
 
-    def _resolve_escalate(self) -> str:
-        """M5 will try a vision-model read here first. With no model
-        wired in yet, every escalation skips straight to asking — §9's
-        specified behavior for "vision model timeout or no API key"."""
+    def _resolve_escalate(self, outcome: EscalationOutcome, now: float) -> str:
+        """D5: accept the model's cell only if it's one perception itself
+        already flagged as a candidate and it's still empty ("consistent
+        with the ink data") — never a cell the model names out of nowhere.
+        Anything else (disagreement, timeout, no key, budget spent, or
+        M4's no-model-wired-in fallback) asks the human instead."""
+        if outcome.cell is not None and outcome.cell in self._ask_cells and self.board[outcome.cell] is None:
+            ratios = self._ask_ratios
+            self._ask_context = None
+            return self._commit(outcome.cell, self.human_symbol, ratios, now)
+
         self.phase = Phase.ASK_HUMAN
         if self._ask_context == "two_marks":
             return "I see two new marks. Which one is your move?"
@@ -345,7 +387,7 @@ class Session:
         self._occupied_warned = None
 
         if len(marked) >= 2:
-            return self._check_two_marks(marked)
+            return self._check_two_marks(marked, observation.ratios)
         self._two_marks_pending = None
 
         if len(marked) == 1 and not ambiguous:
@@ -361,7 +403,7 @@ class Session:
         self._pending_cell = None
 
         if len(ambiguous) == 1 and not marked:
-            return self._check_ambiguous(ambiguous[0])
+            return self._check_ambiguous(ambiguous[0], observation.ratios)
         self._ambiguous_pending = None
         self._ambiguous_streak = 0
         return None
@@ -449,15 +491,15 @@ class Session:
             return f"{cell_name(occupied_changed[0]).capitalize()} is already taken. Please draw in an empty cell."
         return "Those cells are already taken. Please draw in an empty cell."
 
-    def _check_two_marks(self, marked: list[int]) -> str | None:
+    def _check_two_marks(self, marked: list[int], ratios: tuple[float, ...]) -> str | None:
         candidate = frozenset(marked)
         if candidate != self._two_marks_pending:
             self._two_marks_pending = candidate
             return None
         self._two_marks_pending = None
-        return self._enter_escalate("two_marks", candidate)
+        return self._enter_escalate("two_marks", candidate, ratios)
 
-    def _check_ambiguous(self, cell: int) -> str | None:
+    def _check_ambiguous(self, cell: int, ratios: tuple[float, ...]) -> str | None:
         if cell != self._ambiguous_pending:
             self._ambiguous_pending = cell
             self._ambiguous_streak = 1
@@ -467,7 +509,7 @@ class Session:
             return None
         self._ambiguous_pending = None
         self._ambiguous_streak = 0
-        return self._enter_escalate("ambiguous", frozenset({cell}))
+        return self._enter_escalate("ambiguous", frozenset({cell}), ratios)
 
     def _check_wrong_cell(self, cell: int) -> str | None:
         if cell != self._wrong_cell_pending:

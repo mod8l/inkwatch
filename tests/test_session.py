@@ -10,7 +10,7 @@ deliberately out of scope (keyboard y/n, a real vision-model call).
 
 from __future__ import annotations
 
-from inkwatch.events import CellMark, Observation
+from inkwatch.events import CellMark, EscalationOutcome, Observation
 from inkwatch.output import cell_name
 from inkwatch.session import Phase, Session
 
@@ -343,6 +343,7 @@ def test_two_new_marks_escalates_then_asks_which_one():
     assert escalated.phase == Phase.ESCALATE
     assert escalated.confidence == "escalating"
     assert escalated.message is None
+    assert escalated.escalation_cells == frozenset({0, 1})
 
     asked = session.update(obs(cell_marks=two_marks, frame_ts=3.0), now=3.0)
     assert asked.phase == Phase.ASK_HUMAN
@@ -377,6 +378,76 @@ def test_two_new_marks_withdrawn_returns_to_wait_human():
 
     assert session.phase == Phase.WAIT_HUMAN
     assert all(c is None for c in session.board)
+
+
+# -- M5: a real vision-model answer plugs into the same ESCALATE beat -----
+
+
+def test_apply_escalation_accepts_a_consistent_model_answer():
+    session = _calibrated_session()
+    two_marks = marks(c0="marked", c1="marked")
+    session.update(obs(cell_marks=two_marks, frame_ts=1.0), now=1.0)
+    escalated = session.update(obs(cell_marks=two_marks, frame_ts=2.0), now=2.0)
+    assert escalated.phase == Phase.ESCALATE
+
+    outcome = EscalationOutcome(cell=1, error=None, latency_s=0.4, cost=0.001)
+    result = session.apply_escalation(outcome, now=2.1)
+
+    assert session.board[1] == "X"
+    assert session.board[0] is None
+    assert session.phase == Phase.WAIT_AGENT_INK
+    assert result.phase == Phase.WAIT_AGENT_INK
+
+
+def test_apply_escalation_rejects_a_cell_outside_the_candidates():
+    session = _calibrated_session()
+    two_marks = marks(c0="marked", c1="marked")
+    session.update(obs(cell_marks=two_marks, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=two_marks, frame_ts=2.0), now=2.0)
+    assert session.phase == Phase.ESCALATE
+
+    # cell 5 was never one of the flagged candidates -- D5's "consistent
+    # with the ink data" gate must reject it even though it's a real answer.
+    outcome = EscalationOutcome(cell=5, error=None, latency_s=0.4, cost=0.001)
+    result = session.apply_escalation(outcome, now=2.1)
+
+    assert all(c is None for c in session.board)
+    assert result.phase == Phase.ASK_HUMAN
+    assert "which one" in result.message.lower()
+
+
+def test_apply_escalation_falls_back_to_asking_on_a_failed_outcome():
+    session = _calibrated_session()
+    faint = marks(c4="ambiguous")
+    for ts in (1.0, 2.0, 3.0):
+        session.update(obs(cell_marks=faint, frame_ts=ts), now=ts)
+    assert session.phase == Phase.ESCALATE
+
+    outcome = EscalationOutcome(cell=None, error="timeout", latency_s=3.0, cost=0.0)
+    result = session.apply_escalation(outcome, now=3.1)
+
+    assert result.phase == Phase.ASK_HUMAN
+    assert "light" in result.message.lower()
+
+
+def test_apply_escalation_is_a_no_op_once_the_session_has_moved_on():
+    session = _calibrated_session()
+    two_marks = marks(c0="marked", c1="marked")
+    session.update(obs(cell_marks=two_marks, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=two_marks, frame_ts=2.0), now=2.0)
+    assert session.phase == Phase.ESCALATE
+
+    # the safety net in update() already resolved it (simulating a caller
+    # that never wired up apply_escalation before the next frame)
+    session.update(obs(cell_marks=two_marks, frame_ts=3.0), now=3.0)
+    assert session.phase == Phase.ASK_HUMAN
+
+    stale = EscalationOutcome(cell=0, error=None, latency_s=0.1, cost=0.0)
+    result = session.apply_escalation(stale, now=3.1)
+
+    assert session.phase == Phase.ASK_HUMAN  # untouched by the stale answer
+    assert all(c is None for c in session.board)
+    assert result.message is None
 
 
 # -- M4: persistent ambiguous ink / shadow (§9) --------------------------
