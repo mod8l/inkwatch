@@ -144,8 +144,15 @@ def draw_overlay(
     color = _CONFIDENCE_COLOR.get(confidence, (200, 200, 200))
 
     for idx, (x0, y0, x1, y1) in enumerate(cell_bounds(size)):
-        box_color = (255, 180, 0) if idx == target_cell else color
-        thickness = 3 if idx == target_cell else 1
+        pending = cell_marks is not None and cell_marks[idx] != "none" and board[idx] is None
+        if idx == target_cell:
+            box_color, thickness = (255, 180, 0), 3
+        elif pending:
+            # §9 "two new marks at once": both candidate cells need to be
+            # visible on the overlay, not just in --debug's per-cell text.
+            box_color, thickness = (0, 255, 255), 2
+        else:
+            box_color, thickness = color, 1
         cv2.rectangle(rectified, (x0, y0), (x1, y1), box_color, thickness)
         symbol = board[idx]
         if symbol is not None:

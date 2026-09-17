@@ -1,7 +1,8 @@
 """CLI entry point: wires perception, the session state machine, decision,
-and output into the live camera loop (M3, "playable loop... happy path
-only, no escalation"). `session.py`'s module docstring lists what's still
-open for M4/M5 — this loop doesn't add any recovery of its own.
+and output into the live camera loop. `session.py` owns all of §9's
+recovery behavior (M4); this loop's own recovery job is narrower — the
+camera itself going away (§9 "Camera disconnects"), which happens below
+the perception layer and so isn't something an `Observation` can carry.
 
 Needs a real camera to run, so it can't be exercised by an automated test;
 see README.md for exactly what to try and what you should see.
@@ -15,8 +16,10 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 import yaml
 
+from inkwatch.events import Observation
 from inkwatch.output import Speaker, draw_overlay
 from inkwatch.perception import (
     DEFAULT_CELL_INSET,
@@ -27,7 +30,10 @@ from inkwatch.perception import (
     Perceiver,
     StabilityGate,
 )
-from inkwatch.session import Session
+from inkwatch.session import DEFAULT_OCCLUSION_REMINDER_S, Session
+
+CAMERA_LOST_MESSAGE_S = 2.0  # §9: "Camera disconnects... No frames for 2 s"
+CAMERA_RETRY_S = 2.0  # §9: "Retry every 2 s"
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
@@ -46,7 +52,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-voice", action="store_true", help="Display only, no speech")
     parser.add_argument(
         "--no-escalation", action="store_true",
-        help="Never call the vision model (the only mode M3 supports anyway — escalation is M5)",
+        help="Never call the vision model (a no-op for now — escalation.py itself is M5; "
+        "every low-confidence read already asks the human directly, same as §9's no-API-key case)",
     )
     parser.add_argument("--record", action="store_true", help="Save the raw stream for replay (not yet built, M5)")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to config.yaml")
@@ -80,18 +87,59 @@ def main(argv: list[str] | None = None) -> None:
     )
     ink_low = config.get("ink_threshold_low", DEFAULT_INK_LOW)
     ink_high = config.get("ink_threshold_high", DEFAULT_INK_HIGH)
-    session = Session(agent_first=agent_first, reminder_s=tuple(config.get("reminder_s", (10, 20))))
+    session = Session(
+        agent_first=agent_first,
+        reminder_s=tuple(config.get("reminder_s", (10, 20))),
+        occlusion_reminder_s=config.get("occlusion_reminder_s", DEFAULT_OCCLUSION_REMINDER_S),
+        ink_low=ink_low,
+        ink_high=ink_high,
+    )
     speaker = Speaker(enabled=voice)
     debug = False
+    camera_lost_since: float | None = None
+    camera_lost_announced = False
 
     try:
         while True:
             ok, frame = cap.read()
-            if not ok:
-                print("Camera read failed", file=sys.stderr)
-                break
-
             now = time.monotonic()
+
+            if not ok:
+                # Below the perception layer entirely — there's no frame to
+                # build an Observation from, so BOARD_LOST is driven with a
+                # synthetic not-found one (§9: resumes via RESYNC once
+                # frames come back, same path as a bumped page).
+                if camera_lost_since is None:
+                    camera_lost_since = now
+                    camera_lost_announced = False
+                elif not camera_lost_announced and now - camera_lost_since >= CAMERA_LOST_MESSAGE_S:
+                    message = "I've lost the camera."
+                    print(message, file=sys.stderr)
+                    speaker.say(message)
+                    camera_lost_announced = True
+
+                session.update(
+                    Observation(
+                        frame_ts=now, found=False, stable=False, occluded=True,
+                        missing_corners=(), ratios=None, cell_marks=None,
+                    ),
+                    now,
+                )
+
+                banner = np.zeros((240, 320, 3), dtype=np.uint8)
+                cv2.putText(
+                    banner, "Camera disconnected -- retrying...", (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1,
+                )
+                cv2.imshow("inkwatch", banner)
+                if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                    break
+                time.sleep(CAMERA_RETRY_S)
+                continue
+
+            camera_lost_since = None
+            camera_lost_announced = False
+
             observation = perceiver.observe(frame, session.baseline, now=now, low=ink_low, high=ink_high)
             result = session.update(observation, now)
 
@@ -125,6 +173,16 @@ def main(argv: list[str] | None = None) -> None:
                 break
             if key == ord("d"):
                 debug = not debug
+            if key == ord("r"):
+                session.force_resync()
+            if key == ord("n"):
+                session = Session(
+                    agent_first=agent_first,
+                    reminder_s=tuple(config.get("reminder_s", (10, 20))),
+                    occlusion_reminder_s=config.get("occlusion_reminder_s", DEFAULT_OCCLUSION_REMINDER_S),
+                    ink_low=ink_low,
+                    ink_high=ink_high,
+                )
     finally:
         speaker.close()
         cap.release()

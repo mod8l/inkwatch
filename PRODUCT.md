@@ -231,6 +231,7 @@ escalation:
   timeout_s: 3
   max_calls_per_game: 5
 reminder_s: [10, 20]
+occlusion_reminder_s: 15  # §9: how long a lingering hand waits before "Take your time..."
 record: false
 log_dir: sessions/
 ```
