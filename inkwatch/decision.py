@@ -1,10 +1,11 @@
 """Move selection via minimax with alpha-beta pruning (G3).
 
-No OpenCV, no I/O. Imports `rules.py` for legal moves, applying a move,
-and terminal/winner checks at every node of the game tree — the two
-modules stay each other's only allowed `inkwatch` import (Gad's call on
-CLAUDE.md's hard rule: reimplementing rules here too would risk the two
-disagreeing about what's legal).
+No OpenCV, no I/O. Imports `rules.py` (one-way; `rules.py` imports
+nothing back) for legal moves, applying a move, and terminal/winner
+checks at every node of the game tree — `rules.py` is this module's only
+allowed `inkwatch` import (Gad's call on CLAUDE.md's hard rule:
+reimplementing rules here too would risk the two disagreeing about what's
+legal).
 
 Perfect play; ties are broken by a fixed preference order (center,
 corners, edges) so the agent's choice is deterministic and testable.
