@@ -1,25 +1,28 @@
-"""Board location, rectification, and per-cell ink measurement.
+"""Board location, rectification, stability, and per-cell ink measurement.
 
 Finds the four ArUco corner markers, computes the homography from the
 inner (board-facing) marker corners to a fixed-size top-down image, and
 warps the frame (P1, P2). Divides the rectified board into 9 inset cells
 and measures ink per cell against an accepted baseline (P3, P4, D1).
+Gates evaluation on a stable, unoccluded scene (P5, P6).
 
-Perception never mutates game state; it only ever hands back pixels,
-geometry, and per-cell measurements. Stability gating (P5, P6), the
-confidence rules that turn a classification into an accepted move (D2,
-D3), and everything downstream of that live in the session state machine
-(M3+), not here.
+Perception never mutates game state. `Perceiver.observe()` is the one
+entry point session.py calls each frame: it takes the frame and session's
+current baseline, and hands back an `Observation` (events.py) — never a
+raw frame, never anything it owns itself. The confidence rules that turn
+a classification into an accepted move (D2, D3) and everything downstream
+of that live in the session state machine (M3+), not here.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Literal
 
 import cv2
 import numpy as np
+
+from inkwatch.events import CellMark, Observation
 
 # Corner name -> (marker id, index of that marker's corner facing the
 # board interior). ArUco corners are returned in the order the marker was
@@ -42,7 +45,8 @@ DEFAULT_CELL_INSET = 0.15
 DEFAULT_INK_LOW = 0.02
 DEFAULT_INK_HIGH = 0.05
 
-CellMark = Literal["none", "ambiguous", "marked"]
+DEFAULT_STABILITY_FRAMES = 10
+DEFAULT_MOTION_THRESHOLD = 2.0  # mean abs pixel diff (0-255) between consecutive rectified frames
 
 
 @dataclass
@@ -221,3 +225,99 @@ class BoardTracker:
 
     def _warp(self, frame: np.ndarray, homography: np.ndarray) -> np.ndarray:
         return cv2.warpPerspective(frame, homography, (self.output_size, self.output_size))
+
+
+class StabilityGate:
+    """Tracks whether the rectified scene has gone quiet (P5) or is
+    occluded (P6), across successive calls to `update()`.
+
+    Stable requires N consecutive frames with all four markers currently
+    visible (not a P2 hold-over) and low inter-frame motion. Anything
+    else — markers missing/held-over, or motion above threshold — is
+    occluded and resets the quiet-frame count.
+    """
+
+    def __init__(
+        self,
+        stability_frames: int = DEFAULT_STABILITY_FRAMES,
+        motion_threshold: float = DEFAULT_MOTION_THRESHOLD,
+    ) -> None:
+        self.stability_frames = stability_frames
+        self.motion_threshold = motion_threshold
+        self._prev: np.ndarray | None = None
+        self._quiet_count = 0
+
+    def update(self, rectified: np.ndarray | None, markers_visible: bool) -> tuple[bool, bool]:
+        """Returns (stable, occluded) for this frame."""
+        if rectified is None or not markers_visible:
+            self._prev = None
+            self._quiet_count = 0
+            return False, True
+
+        moved = False
+        if self._prev is not None:
+            diff = cv2.absdiff(rectified, self._prev)
+            moved = float(diff.mean()) > self.motion_threshold
+        self._prev = rectified
+
+        if moved:
+            self._quiet_count = 0
+            return False, True
+
+        self._quiet_count += 1
+        return self._quiet_count >= self.stability_frames, False
+
+
+class Perceiver:
+    """The one call session.py (or `__main__.py` on its behalf) makes per
+    frame: locate the board, gate on stability, measure ink, and classify
+    against the baseline session currently owns — packaged as one
+    `Observation` (events.py), never a raw frame.
+    """
+
+    def __init__(
+        self,
+        board: BoardTracker | None = None,
+        stability: StabilityGate | None = None,
+        cell_inset: float = DEFAULT_CELL_INSET,
+    ) -> None:
+        self.board = board if board is not None else BoardTracker()
+        self.stability = stability if stability is not None else StabilityGate()
+        self.cell_inset = cell_inset
+        # The last rectified frame, for a caller's own display purposes
+        # only (e.g. __main__.py's overlay) — never part of `Observation`,
+        # which never carries pixels to session.py.
+        self.last_rectified: np.ndarray | None = None
+
+    def observe(
+        self,
+        frame: np.ndarray,
+        baseline: list[float] | None,
+        now: float | None = None,
+        low: float = DEFAULT_INK_LOW,
+        high: float = DEFAULT_INK_HIGH,
+    ) -> Observation:
+        now = time.monotonic() if now is None else now
+        result = self.board.update(frame, now)
+        self.last_rectified = result.rectified if result.found else None
+        markers_visible = result.found and not result.reused
+        stable, occluded = self.stability.update(
+            result.rectified if result.found else None, markers_visible
+        )
+
+        ratios: list[float] | None = None
+        marks: list[CellMark] | None = None
+        if result.found:
+            ratios = measure_cells(result.rectified, inset=self.cell_inset)
+            if baseline is not None:
+                marks = classify_cells(ratios, baseline, low, high)
+
+        return Observation(
+            frame_ts=now,
+            found=result.found,
+            stable=stable,
+            occluded=occluded,
+            missing_corners=tuple(result.missing_corners),
+            ratios=tuple(ratios) if ratios is not None else None,
+            cell_marks=tuple(marks) if marks is not None else None,
+        )

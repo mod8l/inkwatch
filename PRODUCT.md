@@ -221,6 +221,7 @@ camera: 0                 # index or stream URL
 agent_first: false
 voice: true
 stability_frames: 10
+motion_threshold: 2.0     # inter-frame pixel diff below which the scene counts as quiet (P5)
 ink_threshold_low: 0.02
 ink_threshold_high: 0.05
 cell_inset: 0.15

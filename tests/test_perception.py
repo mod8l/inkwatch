@@ -1,5 +1,5 @@
-"""Tests for board rectification (PRODUCT.md P1, P2) and per-cell ink
-measurement (P3, P4, D1).
+"""Tests for board rectification (PRODUCT.md P1, P2), per-cell ink
+measurement (P3, P4, D1), and stability/observation (P5, P6).
 
 Builds synthetic scenes and rectified boards with known geometry and
 known ink coverage, so the expected result is known without a camera.
@@ -15,6 +15,8 @@ import pytest
 from inkwatch.perception import (
     BoardTracker,
     CORNER_ROLES,
+    Perceiver,
+    StabilityGate,
     cell_bounds,
     classify_cell,
     classify_cells,
@@ -296,3 +298,85 @@ def test_ink_ratio_accepts_grayscale_or_color_crop():
     gray_crop = cv2.cvtColor(color_crop, cv2.COLOR_BGR2GRAY)
 
     assert ink_ratio(color_crop) == pytest.approx(ink_ratio(gray_crop), abs=1e-6)
+
+
+# --- Stability gating (P5, P6) --------------------------------------------
+
+
+def test_identical_frames_become_stable_after_n_consecutive_reads():
+    gate = StabilityGate(stability_frames=3, motion_threshold=2.0)
+    board = make_synthetic_board()
+
+    results = [gate.update(board, markers_visible=True) for _ in range(3)]
+
+    assert results[0] == (False, False)
+    assert results[1] == (False, False)
+    assert results[2] == (True, False)
+
+
+def test_missing_markers_are_occluded_and_never_stable():
+    gate = StabilityGate(stability_frames=3)
+    board = make_synthetic_board()
+
+    for _ in range(5):
+        stable, occluded = gate.update(board, markers_visible=False)
+        assert not stable
+        assert occluded
+
+
+def test_a_new_mark_between_frames_is_occluded_and_resets_the_count():
+    gate = StabilityGate(stability_frames=3, motion_threshold=2.0)
+    blank = make_synthetic_board()
+    marked = make_synthetic_board(marks={4: 0.6})
+
+    gate.update(blank, markers_visible=True)
+    gate.update(blank, markers_visible=True)
+    stable, occluded = gate.update(marked, markers_visible=True)  # motion: hand/mark appearing
+
+    assert not stable
+    assert occluded
+
+    # Needs a fresh run of quiet frames after the disturbance.
+    gate.update(marked, markers_visible=True)
+    later_stable, later_occluded = gate.update(marked, markers_visible=True)
+    assert not later_stable
+    assert not later_occluded
+
+
+# --- Perceiver: one Observation per frame (P1-P6, D1) ----------------------
+
+
+def test_perceiver_reports_not_found_and_occluded_with_no_markers():
+    perceiver = Perceiver()
+    frame = make_synthetic_frame(omit={"bottom_right"})
+
+    observation = perceiver.observe(frame, baseline=None, now=0.0)
+
+    assert not observation.found
+    assert observation.occluded
+    assert not observation.stable
+    assert observation.ratios is None
+    assert observation.cell_marks is None
+
+
+def test_perceiver_becomes_stable_after_repeated_quiet_frames():
+    perceiver = Perceiver(stability=StabilityGate(stability_frames=3))
+    frame = make_synthetic_frame()
+
+    observations = [perceiver.observe(frame, baseline=None, now=float(i)) for i in range(3)]
+
+    assert [o.found for o in observations] == [True, True, True]
+    assert [o.stable for o in observations] == [False, False, True]
+    assert all(o.ratios is not None for o in observations)
+    assert all(o.cell_marks is None for o in observations)  # no baseline supplied yet
+
+
+def test_perceiver_classifies_cell_marks_against_the_supplied_baseline():
+    perceiver = Perceiver(stability=StabilityGate(stability_frames=1))
+    frame = make_synthetic_frame()  # blank board behind the markers
+
+    observation = perceiver.observe(frame, baseline=[0.0] * 9, now=0.0)
+
+    assert observation.stable
+    assert observation.cell_marks is not None
+    assert all(mark == "none" for mark in observation.cell_marks)
