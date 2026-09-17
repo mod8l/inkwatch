@@ -57,7 +57,7 @@ Check it:
 python tools/calibrate.py
 ```
 
-You should see the straightened top-down board with a small ink number in each cell. Draw a test mark in one cell: its number should jump, the others should stay near zero. Press `q` to close. Use a fresh sheet for the game.
+You should see the straightened top-down board with a small ink number and a none/ambiguous/marked label in each cell. With a blank sheet in view, press `b` to snapshot the baseline, then draw a test mark in one cell: its label should flip to `marked` while the others stay `none`. Press `q` to close. Use a fresh sheet for the game.
 
 ### 5. (Optional) Enable the vision fallback
 The game plays fully offline. A vision model is only called when the camera view is ambiguous. To enable it:
@@ -80,7 +80,7 @@ The agent says *"I can see the board. You're X, you go first."* Then:
 1. Draw an **X** in any cell and move your hand away.
 2. The agent says which cell you played and where it will play, e.g. *"You played center. I'll take top left. Please draw an O there."*
 3. Draw the **O** where it asked. It confirms and it's your turn again.
-4. At the end it announces the result and checks the page matches.
+4. At the end it announces the result. (The re-read that checks the final page still matches its report is M4/G5 — not built yet; see `NOTES.md`.)
 
 Cells are named by row (**top / middle / bottom**) and column (**left / center / right**). The middle cell is just **center**. The target cell is also highlighted on screen.
 
@@ -88,13 +88,13 @@ Cells are named by row (**top / middle / bottom**) and column (**left / center /
 
 ## Controls
 
-| Key | Action |
-|---|---|
-| `q` | Quit |
-| `n` | New game (use a fresh sheet) |
-| `r` | Force a full re-read of the board |
-| `d` | Toggle debug overlay (ink ratios, confidence) |
-| `y` / `n` | Answer the agent's question, if it asks one you can't resolve on the page |
+| Key | Action | Built? |
+|---|---|---|
+| `q` | Quit | Yes |
+| `d` | Toggle debug overlay (per-cell none/ambiguous/marked) | Yes |
+| `n` | New game (use a fresh sheet) | Not yet (M4) |
+| `r` | Force a full re-read of the board | Not yet (M4) |
+| `y` / `n` | Answer the agent's question, if it asks one you can't resolve on the page | Not yet (M4/M5) |
 
 ## Options
 
@@ -103,8 +103,8 @@ python -m inkwatch --agent-first        # agent plays X and opens
 python -m inkwatch --camera 1           # pick another camera index
 python -m inkwatch --camera <url>       # IP camera / phone stream
 python -m inkwatch --no-voice           # display only
-python -m inkwatch --no-escalation      # never call the vision model
-python -m inkwatch --record             # save the raw stream for replay
+python -m inkwatch --no-escalation      # never call the vision model (currently the only mode there is; escalation is M5)
+python -m inkwatch --record             # save the raw stream for replay (accepted but not yet built, M5)
 ```
 
 All defaults live in [`config.yaml`](config.yaml).
@@ -140,16 +140,9 @@ A phone on a gooseneck or propped on a glass above the desk gives the best angle
 pytest
 ```
 
-Covers rules, decision (the agent never loses), session state transitions, and ink detection on saved cell images. One short recorded game runs through the full pipeline as a replay test.
+Covers rules, decision (the agent never loses, proved exhaustively), board rectification and ink detection on synthetic frames, the TTS queue, and the session state machine driven with synthetic observations — all camera-free.
 
-Replay any recorded session without a camera:
-
-```bash
-python -m inkwatch --record                      # play and record
-python -m inkwatch.replay sessions/<session-id>  # re-run perception + session offline
-```
-
-Replay writes a fresh event log you can diff against the original. This is how threshold changes are checked against the same frames instead of new, uncontrolled games. See [`eval/README.md`](eval/README.md).
+Recording and replay (`--record`, `python -m inkwatch.replay`) aren't built yet — that's M5. Once they are: replay re-runs perception + session on a saved stream without a camera, writing a fresh event log you can diff against the original, which is how threshold changes get checked against the same frames instead of new, uncontrolled games.
 
 ## Measured results
 
