@@ -57,7 +57,7 @@ Check it:
 python tools/calibrate.py
 ```
 
-You should see the straightened top-down board with a small ink number in each cell. Draw a test mark in one cell: its number should jump, the others should stay near zero. Press `q` to close. Use a fresh sheet for the game.
+You should see the straightened top-down board with a small ink number and a none/ambiguous/marked label in each cell. With a blank sheet in view, press `b` to snapshot the baseline, then draw a test mark in one cell: its label should flip to `marked` while the others stay `none`. Press `q` to close. Use a fresh sheet for the game.
 
 ### 5. (Optional) Enable the vision fallback
 The game plays fully offline. A vision model is only called when the camera view is ambiguous. To enable it:
