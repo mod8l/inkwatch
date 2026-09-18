@@ -273,9 +273,11 @@ inkwatch/
   decision.py      # minimax
   output.py        # TTS queue + overlay rendering
   replay.py        # offline pipeline over recordings
+  metrics.py       # eval scoring: events.jsonl + a label -> §13.1's numbers
 tools/make_sheet.py  # printable board with ArUco markers
 tools/calibrate.py   # debug view: raw feed + rectified board, corner status
-tests/             # rules, decision, replay
+tests/             # rules, decision, replay, metrics
+eval/              # ground-truth labels + how to record, label, score (§13)
 config.yaml
 README.md  PRODUCT.md  ARCHITECTURE.md
 ```

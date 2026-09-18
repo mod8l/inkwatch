@@ -151,18 +151,29 @@ python -m inkwatch.replay sessions/<timestamp>
 
 This re-runs perception + session (+ escalation, if a key is set) over the exact same frames and writes `sessions/<timestamp>/replay.jsonl` — diff it against `events.jsonl`, or re-run with different `--ink-low`/`--ink-high`/`--stability-frames` to check a threshold change against a real, already-played game instead of a fresh, uncontrolled one.
 
+## Eval scoring
+
+Once you have ≥10 recorded games (`--record`, per `eval/README.md`) labeled with ground truth (`eval/labels/<timestamp>.yaml`), score them against `PRODUCT.md` §13.1's targets:
+
+```bash
+python -m inkwatch.metrics sessions/<timestamp-1> sessions/<timestamp-2> ...
+```
+
+Prints the table below with real numbers, straight from what each game's `events.jsonl` logged. See `eval/README.md` for how to record and label a game.
+
 ## Measured results
 
-TODO: fill from recorded eval games. Targets are in [`PRODUCT.md` §13](PRODUCT.md).
+TODO: fill from recorded eval games (`python -m inkwatch.metrics`, see `eval/README.md`). Targets are in [`PRODUCT.md` §13](PRODUCT.md).
 
 | Metric | Target | Measured |
 |---|---|---|
 | Move detection accuracy | ≥ 98% | |
 | False triggers per 10 games | ≤ 1 | |
 | Escalation rate | < 5% of turns | |
+| Human-question rate | < 3% of turns | |
 | Time to detect (p50) | ≤ 1 s | |
 | End-of-game desync | 0 | |
-| Cost per game | ≈ $0 | |
+| Cost per game | ≈ $0 (reported as avg. escalation tokens/game — see `NOTES.md` D-M5.7) | |
 
 ## Project layout
 
@@ -176,6 +187,7 @@ inkwatch/            the application: one file per architecture component
   output.py          speech + overlay
   events.py          observation types and event log
   replay.py          offline pipeline over recordings
+  metrics.py         eval scoring: events.jsonl + a label -> PRODUCT.md §13.1's numbers
 tools/               printable sheet generator, calibration view
 tests/               unit and replay tests
 eval/                ground-truth labels and metrics instructions
