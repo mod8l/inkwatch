@@ -263,6 +263,12 @@ def main(argv: list[str] | None = None) -> None:
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
                     break
                 time.sleep(CAMERA_RETRY_S)
+                # A dead capture doesn't hot-plug on read(): re-reading the
+                # same VideoCapture after a real unplug fails forever.
+                # Release and re-open, or §9's "retry every 2 s" never
+                # actually recovers.
+                cap.release()
+                cap = cv2.VideoCapture(camera)
                 continue
 
             camera_lost_since = None
