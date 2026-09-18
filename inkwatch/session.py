@@ -171,13 +171,15 @@ class Session:
         # with — apply_escalation() isn't observation-driven itself.
         self._ask_ratios: tuple[float, ...] | None = None
 
-        # Debounce state (D6-style: two consecutive matching stable reads)
+        # Debounce state (D6-style: consecutive matching stable reads)
         # for each recovery check, kept separate so an ambiguous flicker on
         # one doesn't reset the count on another.
         self._two_marks_pending: frozenset[int] | None = None
         self._ambiguous_pending: int | None = None
         self._ambiguous_streak = 0
-        self._wrong_cell_pending: int | None = None
+        self._wrong_cell_pending: frozenset[int] | None = None
+        self._stray_pending: tuple[frozenset[int], bool] | None = None
+        self._stray_streak = 0
         self._occupied_pending: tuple[frozenset[int], frozenset[int]] | None = None
         self._occupied_warned: tuple[frozenset[int], frozenset[int]] | None = None
 
@@ -289,6 +291,8 @@ class Session:
         self._ambiguous_pending = None
         self._ambiguous_streak = 0
         self._wrong_cell_pending = None
+        self._stray_pending = None
+        self._stray_streak = 0
         self._occupied_pending = None
         self._occupied_warned = None
 
@@ -370,7 +374,10 @@ class Session:
 
         self.phase = Phase.ASK_HUMAN
         if self._ask_context == "two_marks":
-            return "I see two new marks. Which one is your move?"
+            if len(self._ask_cells) == 2:
+                return "I see two new marks. Which one is your move?"
+            names = ", ".join(cell_name(c) for c in sorted(self._ask_cells))
+            return f"I see new marks in {names}. Which one is your move?"
         cell = next(iter(self._ask_cells))
         return f"I can't tell if you've drawn in {cell_name(cell)}. Can you check the light or the page?"
 
@@ -386,11 +393,20 @@ class Session:
         self._occupied_pending = None
         self._occupied_warned = None
 
-        if len(marked) >= 2:
-            return self._check_two_marks(marked, observation.ratios)
+        if len(marked) + len(ambiguous) >= 2:
+            # Two clear marks, a clear mark plus a shadow/ambiguous cell,
+            # or two ambiguous cells: more than one candidate is §9's
+            # "which one is your move?" question regardless of which band
+            # each candidate fell in — escalate over every cell in doubt
+            # rather than wait silently for a cleaner read that a shadow
+            # will never produce.
+            self._pending_cell = None
+            self._ambiguous_pending = None
+            self._ambiguous_streak = 0
+            return self._check_two_marks(marked + ambiguous, observation.ratios)
         self._two_marks_pending = None
 
-        if len(marked) == 1 and not ambiguous:
+        if len(marked) == 1:
             self._ambiguous_pending = None
             self._ambiguous_streak = 0
             candidate = marked[0]
@@ -402,7 +418,7 @@ class Session:
             return self._commit(candidate, self.human_symbol, observation.ratios, now)
         self._pending_cell = None
 
-        if len(ambiguous) == 1 and not marked:
+        if len(ambiguous) == 1:
             return self._check_ambiguous(ambiguous[0], observation.ratios)
         self._ambiguous_pending = None
         self._ambiguous_streak = 0
@@ -427,6 +443,8 @@ class Session:
 
         if marked == [self.target_cell] and not ambiguous:
             self._wrong_cell_pending = None
+            self._stray_pending = None
+            self._stray_streak = 0
             if self._pending_cell != self.target_cell:
                 self._pending_cell = self.target_cell
                 return None
@@ -436,9 +454,24 @@ class Session:
             return self._commit(self.target_cell, self.agent_symbol, observation.ratios, now)
         self._pending_cell = None
 
-        if len(marked) == 1 and marked[0] != self.target_cell and not ambiguous:
-            return self._check_wrong_cell(marked[0])
+        strays = [c for c in marked if c != self.target_cell]
+        if strays:
+            # Clear ink anywhere but the armed cell — the human drew the
+            # agent's mark somewhere else, or added an extra one. One or
+            # several, this is §9's "wrong cell" ask, not a silent wait.
+            self._stray_pending = None
+            self._stray_streak = 0
+            return self._check_wrong_cell(strays)
         self._wrong_cell_pending = None
+
+        if ambiguous:
+            # Noise around (or instead of) the armed cell's ink: brief is
+            # a pen mid-stroke and just waits (the O3 reminder covers the
+            # silence); persistent is §9's shadow/glare and gets a spoken
+            # ask after a streak rather than stalling the game.
+            return self._check_stray_noise(ambiguous, target_marked=self.target_cell in marked)
+        self._stray_pending = None
+        self._stray_streak = 0
         return None
 
     def _maybe_remind(self, now: float) -> str | None:
@@ -491,8 +524,13 @@ class Session:
             return f"{cell_name(occupied_changed[0]).capitalize()} is already taken. Please draw in an empty cell."
         return "Those cells are already taken. Please draw in an empty cell."
 
-    def _check_two_marks(self, marked: list[int], ratios: tuple[float, ...]) -> str | None:
-        candidate = frozenset(marked)
+    def _check_two_marks(self, cells: list[int], ratios: tuple[float, ...]) -> str | None:
+        """§9's "two new marks at once", generalized to any contested
+        read — two clear marks, a clear mark plus an ambiguous one, or
+        two ambiguous cells. Same debounce, same escalation; candidates
+        are every cell in doubt, so the model/human is asked "which of
+        THESE" rather than being trusted to name a cell from nowhere."""
+        candidate = frozenset(cells)
         if candidate != self._two_marks_pending:
             self._two_marks_pending = candidate
             return None
@@ -511,15 +549,46 @@ class Session:
         self._ambiguous_streak = 0
         return self._enter_escalate("ambiguous", frozenset({cell}), ratios)
 
-    def _check_wrong_cell(self, cell: int) -> str | None:
-        if cell != self._wrong_cell_pending:
-            self._wrong_cell_pending = cell
+    def _check_wrong_cell(self, cells: list[int]) -> str | None:
+        candidate = frozenset(cells)
+        if candidate != self._wrong_cell_pending:
+            self._wrong_cell_pending = candidate
             return None
         self._wrong_cell_pending = None
         self.phase = Phase.ASK_HUMAN
         self._ask_context = "wrong_cell"
         assert self.target_cell is not None
-        return f"I asked for {cell_name(self.target_cell)}, but I see a mark in {cell_name(cell)}."
+        names = ", ".join(cell_name(c) for c in sorted(candidate))
+        verb = "a mark" if len(candidate) == 1 else "marks"
+        return f"I asked for {cell_name(self.target_cell)}, but I see {verb} in {names}."
+
+    def _check_stray_noise(self, ambiguous: list[int], target_marked: bool) -> str | None:
+        """WAIT_AGENT_INK's persistent-ambiguous case: the armed cell's
+        ink (or the page alone) keeps reading unclear, which a shadow or
+        glare will do forever. Streak-gated like `_check_ambiguous`, then
+        asks out loud — resolving through the page via the same
+        "wrong_cell" ASK_HUMAN path, which commits the armed cell as soon
+        as the read is clean."""
+        candidate = (frozenset(ambiguous), target_marked)
+        if candidate != self._stray_pending:
+            self._stray_pending = candidate
+            self._stray_streak = 1
+            return None
+        self._stray_streak += 1
+        if self._stray_streak < AMBIGUOUS_ESCALATE_READS:
+            return None
+        self._stray_pending = None
+        self._stray_streak = 0
+        self.phase = Phase.ASK_HUMAN
+        self._ask_context = "wrong_cell"
+        assert self.target_cell is not None
+        names = ", ".join(cell_name(c) for c in sorted(ambiguous))
+        if target_marked:
+            return (
+                f"I can see the {self.agent_symbol} in {cell_name(self.target_cell)}, "
+                f"but something's unclear in {names}. Please check the light or the page."
+            )
+        return f"I can't tell if there's a mark in {names}. Please check the light or the page."
 
     # -- ASK_HUMAN ----------------------------------------------------------
 

@@ -629,3 +629,137 @@ def test_hand_lingering_during_wait_human_reminds_after_the_occlusion_timeout():
 
     assert reminder.message is not None
     assert "take your time" in reminder.message.lower()
+
+
+# -- Post-M7: contested reads escalate/ask instead of stalling silently ----
+#
+# A clear mark plus a shadow (marked + ambiguous), two ambiguous cells, or
+# the agent's ink arriving with extra marks used to match no branch in
+# _handle_human_turn/_handle_agent_ink: no commit, no escalation, no
+# message, forever — the game just stopped. Every contested shape now
+# routes into the same escalate-then-ask machinery a clean read gets.
+
+
+def test_one_marked_plus_one_ambiguous_escalates_instead_of_stalling():
+    session = _calibrated_session()
+    mixed = marks(c0="marked", c1="ambiguous")  # a real mark with a shadow beside it
+
+    session.update(obs(cell_marks=mixed, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=mixed, frame_ts=2.0), now=2.0)
+
+    assert session.phase == Phase.ESCALATE
+    assert session.board == (None,) * 9
+
+
+def test_two_ambiguous_cells_escalate_instead_of_stalling():
+    session = _calibrated_session()
+    two_ambiguous = marks(c2="ambiguous", c5="ambiguous")
+
+    session.update(obs(cell_marks=two_ambiguous, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=two_ambiguous, frame_ts=2.0), now=2.0)
+
+    assert session.phase == Phase.ESCALATE
+
+
+def test_mixed_marks_ask_then_commit_once_the_page_is_clear():
+    session = _calibrated_session()
+    mixed = marks(c0="marked", c1="ambiguous")
+
+    session.update(obs(cell_marks=mixed, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=mixed, frame_ts=2.0), now=2.0)
+    assert session.phase == Phase.ESCALATE
+
+    # No escalator wired in: the safety net resolves to ASK_HUMAN.
+    asked = session.update(obs(cell_marks=mixed, frame_ts=3.0), now=3.0)
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "which one is your move" in asked.message.lower()
+
+    # The shadow clears; the real mark commits through the normal debounce.
+    clean = marks(c0="marked")
+    session.update(obs(cell_marks=clean, frame_ts=4.0), now=4.0)
+    session.update(obs(cell_marks=clean, frame_ts=5.0), now=5.0)
+
+    assert session.board[0] == "X"
+    assert session.phase == Phase.WAIT_AGENT_INK
+
+
+def test_more_than_two_candidates_names_the_cells_in_the_question():
+    session = _calibrated_session()
+    three = marks(c0="marked", c1="marked", c2="ambiguous")
+
+    session.update(obs(cell_marks=three, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=three, frame_ts=2.0), now=2.0)
+    asked = session.update(obs(cell_marks=three, frame_ts=3.0), now=3.0)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "top left" in asked.message.lower()
+    assert "which one is your move" in asked.message.lower()
+
+
+def test_agent_ink_in_the_target_plus_a_stray_mark_asks():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    stray = next(i for i in range(9) if i != target and session.board[i] is None)
+    both = marks(**{f"c{target}": "marked", f"c{stray}": "marked"})
+
+    session.update(obs(cell_marks=both, frame_ts=10.0), now=10.0)
+    asked = session.update(obs(cell_marks=both, frame_ts=11.0), now=11.0)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert cell_name(target) in asked.message.lower()
+    assert cell_name(stray) in asked.message.lower()
+    assert session.board[target] is None  # not committed while the page has extra ink
+
+
+def test_two_stray_marks_during_agent_ink_ask_with_plural_wording():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    empties = [i for i in range(9) if i != target and session.board[i] is None][:2]
+    strays = marks(**{f"c{empties[0]}": "marked", f"c{empties[1]}": "marked"})
+
+    session.update(obs(cell_marks=strays, frame_ts=10.0), now=10.0)
+    asked = session.update(obs(cell_marks=strays, frame_ts=11.0), now=11.0)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "marks in" in asked.message.lower()
+    for cell in empties:
+        assert cell_name(cell) in asked.message.lower()
+
+
+def test_target_ink_with_persistent_noise_asks_then_commits_when_clean():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    noisy = next(i for i in range(9) if i != target and session.board[i] is None)
+    read = marks(**{f"c{target}": "marked", f"c{noisy}": "ambiguous"})
+
+    for frame in (10.0, 11.0, 12.0):  # AMBIGUOUS_ESCALATE_READS consistent reads
+        asked = session.update(obs(cell_marks=read, frame_ts=frame), now=frame)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert cell_name(target) in asked.message.lower()
+    assert session.board[target] is None
+
+    clean = marks(**{f"c{target}": "marked"})
+    session.update(obs(cell_marks=clean, frame_ts=13.0), now=13.0)
+    session.update(obs(cell_marks=clean, frame_ts=14.0), now=14.0)
+
+    assert session.board[target] == "O"
+    assert session.phase == Phase.WAIT_HUMAN
+
+
+def test_ambiguous_only_noise_during_agent_ink_asks_after_a_streak():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    noisy = next(i for i in range(9) if i != target and session.board[i] is None)
+    read = marks(**{f"c{noisy}": "ambiguous"})
+
+    for frame in (10.0, 11.0, 12.0):
+        asked = session.update(obs(cell_marks=read, frame_ts=frame), now=frame)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "can't tell" in asked.message.lower()
+    assert session.target_cell == target  # still armed; not silently dropped
