@@ -51,6 +51,7 @@ DEFAULT_INK_HIGH = 0.05
 
 DEFAULT_STABILITY_FRAMES = 10
 DEFAULT_MOTION_THRESHOLD = 2.0  # mean abs pixel diff (0-255) between consecutive rectified frames
+DEFAULT_DROP_TOLERANCE = 2  # marker dropouts tolerated before the quiet count resets (P5)
 
 # Corner smoothing for the hand-drawn detection paths (their corner
 # estimates jitter; ArUco is subpixel-stable and never smoothed).
@@ -229,6 +230,8 @@ PROFILE_PEAK_FLOOR_FRAC = 0.10  # ... and at least this many ink-px per frame-si
 PROFILE_PEAK_BAND = 5  # px on each side of a peak counted as its mass
 PROFILE_SUPPRESS = 10  # px suppressed around a found peak
 PROFILE_MERGE_FRAC = 0.04  # of side: peaks closer than this are one curved line seen twice
+MIN_GRID_SPAN_FRAC = 0.2  # a family's border spacing is at least this share of the frame's small side
+GRID_THIRD_TOL_FRAC = 0.15  # inner lines must sit within this fraction of the spacing at the thirds
 
 
 def _angle_distance(a: float, b: float) -> float:
@@ -267,22 +270,31 @@ def _profile_peaks(profile: np.ndarray, side: int) -> list[tuple[float, float]]:
 
 def _grid_borders(profile: np.ndarray, side: int) -> tuple[float, float] | None:
     """(lo, hi) border positions of one grid family from its projection
-    profile: keeps peaks at least half as strong as the strongest (a
-    shadow streak or page edge is weaker than a full grid line) and
-    requires the 3x3 signature — at least two inner lines. The interior
-    requirement is also what rejects sub-grids: when a real outer line
-    escapes detection, an inner line gets promoted to border and the
-    resulting 3x2 quad rectifies "successfully" onto the wrong region —
-    worse than an honest not-found (seen live)."""
+    profile, or None. A grid is not "four strong lines" — hand lines are
+    routinely half as strong as their neighbors — it's "lines at
+    REGULAR thirds". So: for every candidate border pair, the two
+    expected inner-line positions must actually have peaks. Junk lines
+    (shadow streaks, page edges) don't arrange themselves into thirds."""
     peaks = _profile_peaks(profile, side)
     if len(peaks) < 4:
         return None
-    strongest = max(mass for _, mass in peaks)
-    solid = [(pos, mass) for pos, mass in peaks if mass >= 0.5 * strongest]
-    if len(solid) - 2 < GRID_MIN_INTERIOR_LINES:
-        return None
-    positions = [pos for pos, _ in solid]
-    return positions[0], positions[-1]
+    best: tuple[float, float] | None = None
+    best_score: tuple[int, float] | None = None
+    for i, (lo_pos, lo_mass) in enumerate(peaks):
+        for hi_pos, hi_mass in peaks[i + 1:]:
+            spacing = hi_pos - lo_pos
+            if spacing < MIN_GRID_SPAN_FRAC * side:
+                continue
+            tol = GRID_THIRD_TOL_FRAC * spacing
+            expected = (lo_pos + spacing / 3, lo_pos + 2 * spacing / 3)
+            matched = sum(any(abs(pos - want) <= tol for pos, _ in peaks) for want in expected)
+            if matched < GRID_MIN_INTERIOR_LINES:
+                continue
+            mass = lo_mass + hi_mass + sum(m for pos, m in peaks if lo_pos < pos < hi_pos)
+            score = (matched, mass)
+            if best_score is None or score > best_score:
+                best, best_score = (lo_pos, hi_pos), score
+    return best
 
 
 def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
@@ -525,29 +537,45 @@ class StabilityGate:
     """Tracks whether the rectified scene has gone quiet (P5) or is
     occluded (P6), across successive calls to `update()`.
 
-    Stable requires N consecutive frames with all four markers currently
-    visible (not a P2 hold-over) and low inter-frame motion. Anything
-    else — markers missing/held-over, or motion above threshold — is
-    occluded and resets the quiet-frame count.
+    Stable requires N quiet frames (low inter-frame motion) with all
+    four markers currently visible. Anything else — markers missing/
+    held-over, or motion above threshold — is occluded, so no move is
+    evaluated on it.
+
+    Real hand-drawn detection flickers: a frame or two of marker dropout
+    every dozen frames is normal. A hard reset on every dropout makes N
+    consecutive quiet frames almost unreachable (measured on a live
+    recording: quiet runs of 2-4, never 10, so the game never left
+    CALIBRATING). Up to `drop_tolerance` consecutive dropped frames now
+    PAUSE the count instead of resetting it; a longer gap — a real hand
+    or a lost board — still resets. Commit safety is unaffected: those
+    frames still report occluded (nothing is evaluated on them), and
+    D6's two-consecutive-read debounce still gates every commit.
     """
 
     def __init__(
         self,
         stability_frames: int = DEFAULT_STABILITY_FRAMES,
         motion_threshold: float = DEFAULT_MOTION_THRESHOLD,
+        drop_tolerance: int = DEFAULT_DROP_TOLERANCE,
     ) -> None:
         self.stability_frames = stability_frames
         self.motion_threshold = motion_threshold
+        self.drop_tolerance = drop_tolerance
         self._prev: np.ndarray | None = None
         self._quiet_count = 0
+        self._dropped = 0
 
     def update(self, rectified: np.ndarray | None, markers_visible: bool) -> tuple[bool, bool]:
         """Returns (stable, occluded) for this frame."""
         if rectified is None or not markers_visible:
-            self._prev = None
-            self._quiet_count = 0
+            self._dropped += 1
+            if self._dropped > self.drop_tolerance:
+                self._prev = None
+                self._quiet_count = 0
             return False, True
 
+        self._dropped = 0
         moved = False
         if self._prev is not None:
             diff = cv2.absdiff(rectified, self._prev)

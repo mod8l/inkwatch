@@ -578,3 +578,37 @@ def test_grid_detection_is_stable_enough_for_the_stability_gate():
         assert result.found
         stable, _ = gate.update(result.rectified, markers_visible=True)
     assert stable
+
+
+# -- Stability gate dropout tolerance (P5, live-recording fix) --------------
+#
+# Real hand-drawn detection flickers a frame or two per dozen. A hard
+# reset per dropout makes 10 consecutive quiet frames unreachable; brief
+# dropouts now pause the count instead of resetting it.
+
+
+def _quiet_frame() -> np.ndarray:
+    return np.full((600, 600, 3), 255, dtype=np.uint8)
+
+
+def test_a_two_frame_dropout_pauses_the_quiet_count_instead_of_resetting():
+    gate = StabilityGate(stability_frames=10)
+
+    for _ in range(8):
+        gate.update(_quiet_frame(), markers_visible=True)
+    assert not gate.update(None, markers_visible=False)[0]
+    assert not gate.update(None, markers_visible=False)[0]  # 2 dropped: pause
+
+    assert gate.update(_quiet_frame(), markers_visible=True)[0] is False  # 9th quiet
+    assert gate.update(_quiet_frame(), markers_visible=True)[0] is True  # 10th: stable
+
+
+def test_a_longer_dropout_still_resets_the_quiet_count():
+    gate = StabilityGate(stability_frames=10)
+
+    for _ in range(8):
+        gate.update(_quiet_frame(), markers_visible=True)
+    for _ in range(3):  # one more than the tolerance: a real occlusion
+        gate.update(None, markers_visible=False)
+
+    assert gate.update(_quiet_frame(), markers_visible=True)[0] is False  # back to 1
