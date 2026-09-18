@@ -68,6 +68,24 @@ class RectifyResult:
     missing_corners: list[str] = field(default_factory=list)
     homography: np.ndarray | None = None
     reused: bool = False  # True when found via a held-over homography (P2)
+    # The REAL (possibly uneven) cell-boundary positions in rectified
+    # coordinates — (vertical x positions, horizontal y positions), 4
+    # each — when the board was found via the bare-grid path. None for
+    # marker/square paths, whose grids are regular thirds by design.
+    grid_lines: tuple[tuple[float, ...], tuple[float, ...]] | None = None
+
+
+@dataclass(frozen=True)
+class GridDetection:
+    """What detect_grid_lines returns: the board quad plus everything
+    needed to map the REAL hand-drawn line positions into the rectified
+    image (`_map_grid_lines`)."""
+
+    quad: np.ndarray  # 4 corners, TL/TR/BR/BL, full-frame coordinates
+    v_lines: tuple[float, ...]  # vertical line positions in rotated space (4)
+    h_lines: tuple[float, ...]  # horizontal line positions in rotated space (4)
+    rotation: np.ndarray  # the 2x3 affine that produced the rotated space
+    scale: float  # full-frame / analysis-frame scale factor
 
 
 def detect_markers(
@@ -268,17 +286,19 @@ def _profile_peaks(profile: np.ndarray, side: int) -> list[tuple[float, float]]:
     return [(pos, mass) for pos, mass in merged]
 
 
-def _grid_borders(profile: np.ndarray, side: int) -> tuple[float, float] | None:
-    """(lo, hi) border positions of one grid family from its projection
+def _grid_borders(profile: np.ndarray, side: int) -> tuple[float, float, list[float]] | None:
+    """(lo, hi, inner_positions) of one grid family from its projection
     profile, or None. A grid is not "four strong lines" — hand lines are
     routinely half as strong as their neighbors — it's "lines at
     REGULAR thirds". So: for every candidate border pair, the two
     expected inner-line positions must actually have peaks. Junk lines
-    (shadow streaks, page edges) don't arrange themselves into thirds."""
+    (shadow streaks, page edges) don't arrange themselves into thirds.
+    The inner positions are returned too: downstream cell measurement
+    uses the REAL (uneven) line positions, not perfect thirds."""
     peaks = _profile_peaks(profile, side)
     if len(peaks) < 4:
         return None
-    best: tuple[float, float] | None = None
+    best: tuple[float, float, list[float]] | None = None
     best_score: tuple[int, float] | None = None
     for i, (lo_pos, lo_mass) in enumerate(peaks):
         for hi_pos, hi_mass in peaks[i + 1:]:
@@ -286,25 +306,29 @@ def _grid_borders(profile: np.ndarray, side: int) -> tuple[float, float] | None:
             if spacing < MIN_GRID_SPAN_FRAC * side:
                 continue
             tol = GRID_THIRD_TOL_FRAC * spacing
-            expected = (lo_pos + spacing / 3, lo_pos + 2 * spacing / 3)
-            matched = sum(any(abs(pos - want) <= tol for pos, _ in peaks) for want in expected)
-            if matched < GRID_MIN_INTERIOR_LINES:
+            inners = []
+            for want in (lo_pos + spacing / 3, lo_pos + 2 * spacing / 3):
+                near = [pos for pos, _ in peaks if abs(pos - want) <= tol]
+                if near:
+                    inners.append(min(near, key=lambda pos: abs(pos - want)))
+            if len(inners) < GRID_MIN_INTERIOR_LINES:
                 continue
             mass = lo_mass + hi_mass + sum(m for pos, m in peaks if lo_pos < pos < hi_pos)
-            score = (matched, mass)
+            score = (len(inners), mass)
             if best_score is None or score > best_score:
-                best, best_score = (lo_pos, hi_pos), score
+                best, best_score = (lo_pos, hi_pos, sorted(inners)), score
     return best
 
 
-def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
+def detect_grid_lines(frame: np.ndarray) -> "GridDetection | None":
     """Last-resort board finding for a bare hand-drawn grid: estimates
     the dominant line direction from Hough segments (the only thing
     Hough is trusted with), then reads the actual line positions off
     ink-projection profiles in a rotated copy — a wobbly pencil line
-    still contributes its full length to one peak. Returns the four
-    corners ordered TL,TR,BR,BL (compute_homography's role order), or
-    None — never a guessed quad — when the scene has no convincing 3x3
+    still contributes its full length to one peak. Returns a
+    GridDetection (four corners in compute_homography's role order, plus
+    the REAL line positions for line-aware cell measurement), or None —
+    never a guessed quad — when the scene has no convincing 3x3
     signature."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
     scale = 1.0
@@ -356,7 +380,7 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
     horizontals = _grid_borders(rotated.sum(axis=1) / 255.0, side)
     if verticals is None or horizontals is None:
         return None
-    (x_lo, x_hi), (y_lo, y_hi) = verticals, horizontals
+    (x_lo, x_hi, x_inners), (y_lo, y_hi, y_inners) = verticals, horizontals
 
     # A 3x3 grid's outer square stays square-ish under any sane camera
     # angle; a shadow-edge pairing or a page edge can't say that.
@@ -373,7 +397,37 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
     hull_area = cv2.contourArea(cv2.convexHull(int_quad))
     if hull_area == 0 or area < MIN_GRID_QUAD_FRAC * frame_area or area / hull_area < 0.9:
         return None
-    return quad
+
+    v_lines = tuple(sorted([x_lo, *x_inners, x_hi]))
+    h_lines = tuple(sorted([y_lo, *y_inners, y_hi]))
+    return GridDetection(quad=quad, v_lines=v_lines, h_lines=h_lines, rotation=rotation, scale=scale)
+
+
+def _map_grid_lines(
+    detection: "GridDetection", homography: np.ndarray
+) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
+    """A grid detection's rotated-space line positions, mapped through
+    the (smoothed) homography into rectified-image x/y positions — the
+    TRUE, possibly uneven cell boundaries, so wobbly hand-drawn grid
+    lines stay out of the ink-measurement areas. None (caller falls
+    back to perfect thirds) when the mapping degenerates: detection
+    flips between candidate grids can EMA-blend the homography into a
+    collapsed shape that maps all lines onto one spot."""
+    inverse = cv2.invertAffineTransform(detection.rotation)
+
+    def map_points(points: np.ndarray) -> np.ndarray:
+        pts = (inverse @ np.hstack([points, np.ones((len(points), 1), dtype=np.float32)]).T).T
+        pts = pts / detection.scale
+        return cv2.perspectiveTransform(pts.reshape(1, -1, 2), homography).reshape(-1, 2)
+
+    y0, y1 = detection.h_lines[0], detection.h_lines[-1]
+    x0, x1 = detection.v_lines[0], detection.v_lines[-1]
+    vertical_xs = [float(map_points(np.array([(x, y0), (x, y1)], dtype=np.float32))[:, 0].mean()) for x in detection.v_lines]
+    horizontal_ys = [float(map_points(np.array([(x0, y), (x1, y)], dtype=np.float32))[:, 1].mean()) for y in detection.h_lines]
+    for positions in (vertical_xs, horizontal_ys):
+        if any(b - a < 20 for a, b in zip(positions, positions[1:])):
+            return None
+    return tuple(vertical_xs), tuple(horizontal_ys)
 
 
 def cell_bounds(
@@ -418,10 +472,48 @@ def ink_ratio(cell_image: np.ndarray) -> float:
     return float(np.count_nonzero(dark)) / dark.size
 
 
-def measure_cells(rectified: np.ndarray, inset: float = DEFAULT_CELL_INSET) -> list[float]:
-    """Ink ratio for each of the 9 cells, row-major (P3, P4)."""
+def cell_bounds_grid(
+    v_lines: tuple[float, ...],
+    h_lines: tuple[float, ...],
+    inset: float,
+    size: int,
+) -> list[tuple[int, int, int, int]]:
+    """Inner-cell boxes from the REAL detected line positions (possibly
+    uneven), for hand-drawn grids whose wobbly lines would otherwise
+    fall inside a perfect-thirds inset box and pollute the ink
+    measurement. Boxes are clipped to the image."""
+    bounds = []
+    for row in range(3):
+        for col in range(3):
+            x0, x1 = v_lines[col], v_lines[col + 1]
+            y0, y1 = h_lines[row], h_lines[row + 1]
+            mx, my = (x1 - x0) * inset, (y1 - y0) * inset
+            bounds.append(
+                (
+                    max(0, round(x0 + mx)),
+                    max(0, round(y0 + my)),
+                    min(size, round(x1 - mx)),
+                    min(size, round(y1 - my)),
+                )
+            )
+    return bounds
+
+
+def measure_cells(
+    rectified: np.ndarray,
+    inset: float = DEFAULT_CELL_INSET,
+    grid_lines: tuple[tuple[float, ...], tuple[float, ...]] | None = None,
+) -> list[float]:
+    """Ink ratio for each of the 9 cells, row-major (P3, P4). With
+    `grid_lines` (bare-grid detections), cell boundaries follow the REAL
+    detected lines; otherwise perfect thirds (marker/square paths, whose
+    grids are regular by design)."""
     size = rectified.shape[0]
-    return [ink_ratio(rectified[y0:y1, x0:x1]) for x0, y0, x1, y1 in cell_bounds(size, inset)]
+    if grid_lines is not None:
+        bounds = cell_bounds_grid(grid_lines[0], grid_lines[1], inset, size)
+    else:
+        bounds = cell_bounds(size, inset)
+    return [ink_ratio(rectified[y0:y1, x0:x1]) for x0, y0, x1, y1 in bounds]
 
 
 def classify_cell(
@@ -473,6 +565,7 @@ class BoardTracker:
         self._last_homography: np.ndarray | None = None
         self._last_seen: float | None = None
         self._smooth_src: np.ndarray | None = None
+        self._last_lines: tuple[tuple[float, ...], tuple[float, ...]] | None = None
 
     def _smooth_corners(self, src: np.ndarray, frame: np.ndarray) -> np.ndarray:
         """Hand-drawn detections (corner squares, grid lines) jitter a
@@ -493,27 +586,34 @@ class BoardTracker:
         detected = detect_markers(frame, self._detector)
         homography, missing = compute_homography(detected, self.output_size)
 
+        grid_lines: tuple[tuple[float, ...], tuple[float, ...]] | None = None
         if homography is None:
             # Hand-drawn paths (D1's fallback ladder): four solid black
             # corner squares first, then a bare grid's outer lines. ArUco
             # stays the primary, more precise path whenever it decodes.
             squares = detect_corner_squares(frame)
             src: np.ndarray | None = None
+            grid_detection: GridDetection | None = None
             if squares:
                 src = np.array(
                     [squares[mid][idx] for _, (mid, idx) in CORNER_ROLES.items()],
                     dtype=np.float32,
                 )
             else:
-                src = detect_grid_lines(frame)
+                grid_detection = detect_grid_lines(frame)
+                if grid_detection is not None:
+                    src = grid_detection.quad
             if src is not None:
                 homography = _homography_from_points(self._smooth_corners(src, frame), self.output_size)
+                if grid_detection is not None:
+                    grid_lines = _map_grid_lines(grid_detection, homography)
+                    self._last_lines = grid_lines
 
         if homography is not None:
             self._last_homography = homography
             self._last_seen = now
             rectified = self._warp(frame, homography)
-            return RectifyResult(found=True, rectified=rectified, homography=homography)
+            return RectifyResult(found=True, rectified=rectified, homography=homography, grid_lines=grid_lines)
 
         if self._last_homography is not None and self._last_seen is not None:
             if now - self._last_seen <= self.hold_seconds:
@@ -524,9 +624,11 @@ class BoardTracker:
                     missing_corners=missing,
                     homography=self._last_homography,
                     reused=True,
+                    grid_lines=self._last_lines,
                 )
 
         self._smooth_src = None
+        self._last_lines = None
         return RectifyResult(found=False, rectified=None, missing_corners=missing)
 
     def _warp(self, frame: np.ndarray, homography: np.ndarray) -> np.ndarray:
@@ -630,7 +732,7 @@ class Perceiver:
         ratios: list[float] | None = None
         marks: list[CellMark] | None = None
         if result.found:
-            ratios = measure_cells(result.rectified, inset=self.cell_inset)
+            ratios = measure_cells(result.rectified, inset=self.cell_inset, grid_lines=result.grid_lines)
             if baseline is not None:
                 marks = classify_cells(ratios, baseline, low, high)
 
