@@ -212,23 +212,23 @@ def detect_corner_squares(frame: np.ndarray) -> dict[int, np.ndarray]:
 GRID_MIN_LINE_LEN_FRAC = 0.25  # a grid border spans at least this of the frame's small side
 GRID_ANGLE_BIN_DEG = 3.0
 GRID_ANGLE_TOL_DEG = 8.0
-GRID_CLUSTER_GAP_FRAC = 0.035  # rho clustering gap, fraction of the frame's small side —
-# must absorb a thick, slightly-tilted line's spread (~14-17px at VGA) while staying well
-# below the distance between two grid lines (a third of the board)
-GRID_BORDER_MIN_SUPPORT = 0.06  # speckle floor: a border candidate needs at least this
-# share of its family's total length. Real discrimination (shadow edge vs. grid line)
-# lives in detect_grid_lines' squareness/interior arbitration, NOT here — a stricter
-# gate throws out real borders that are weak for scene reasons (wobbly, half in
-# shadow) while the strong shadow edge passes anyway (seen on the real desk frame).
-GRID_BORDER_REL_SUPPORT = 0.25  # ... and at least this share of the strongest cluster
-MIN_GRID_QUAD_FRAC = 0.10  # the four intersections must span this much of the frame —
+MIN_GRID_QUAD_FRAC = 0.10  # the four corners must span this much of the frame —
 # below ~a 175px board at VGA the 9 inset cells get too small to measure ink in.
-# (Was 0.15, a pre-real-frame guess; the actual grid landed at 0.13 because a
-# parallelogram's area is less than its bounding box — anti-junk discrimination
-# comes from the squareness/interior checks, not this floor.)
 GRID_SPACING_MIN = 0.4  # the two families' border spacings must be this square-ish...
 GRID_SPACING_MAX = 2.5  # ... (a 3x3 grid's outer square, under any sane camera angle)
-GRID_MIN_INTERIOR_LINES = 2  # the 3x3 signature: two inner lines per family inside the quad
+GRID_MIN_INTERIOR_LINES = 2  # the 3x3 signature: at least two inner lines per family
+
+# Projection-profile line finding: after rotating the binary so one grid
+# family is vertical, every pixel of a wobbly or slightly curved line
+# still lands in the same peak — there is no straight-segment
+# requirement, which is exactly what Hough drops on real hand-drawn
+# boards (seen live: the full pencil grid survives adaptive thresholding
+# but its curved border produced no 120px-straight Hough run).
+PROFILE_PEAK_MIN_FRAC = 0.25  # a peak needs this share of the strongest peak's ink mass...
+PROFILE_PEAK_FLOOR_FRAC = 0.10  # ... and at least this many ink-px per frame-side, absolutely
+PROFILE_PEAK_BAND = 5  # px on each side of a peak counted as its mass
+PROFILE_SUPPRESS = 10  # px suppressed around a found peak
+PROFILE_MERGE_FRAC = 0.04  # of side: peaks closer than this are one curved line seen twice
 
 
 def _angle_distance(a: float, b: float) -> float:
@@ -236,84 +236,64 @@ def _angle_distance(a: float, b: float) -> float:
     return abs((a - b + 90.0) % 180.0 - 90.0)
 
 
-def _normal_form(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float]:
-    """A segment's own line in normal form (theta, rho), theta in
-    [0, pi), rho signed — OpenCV HoughLines' convention, unique per
-    line. Segments cut from the same physical line — thick, tilted,
-    broken — land at nearly the same (theta, rho) even when their
-    midpoints are scattered along the line, which is what makes
-    clustering robust."""
-    theta = float(np.arctan2(y2 - y1, x2 - x1) + np.pi / 2) % np.pi
-    return theta, x1 * np.cos(theta) + y1 * np.sin(theta)
+def _profile_peaks(profile: np.ndarray, side: int) -> list[tuple[float, float]]:
+    """Peak positions in an ink-projection profile, as (position, mass).
+    Iterative argmax with suppression; peaks closer than the merge
+    window are one curved line seen twice and are merged."""
+    if profile.max() < PROFILE_PEAK_FLOOR_FRAC * side:
+        return []
+    threshold = max(PROFILE_PEAK_MIN_FRAC * profile.max(), PROFILE_PEAK_FLOOR_FRAC * side)
+    work = profile.astype(float).copy()
+    peaks: list[tuple[float, float]] = []
+    for _ in range(8):
+        i = int(np.argmax(work))
+        if work[i] < threshold:
+            break
+        lo, hi = max(0, i - PROFILE_PEAK_BAND), min(len(work), i + PROFILE_PEAK_BAND + 1)
+        band = work[lo:hi]
+        mass = float(band.sum())
+        peaks.append((float((band * np.arange(lo, hi)).sum() / mass), mass))
+        work[max(0, i - PROFILE_SUPPRESS):min(len(work), i + PROFILE_SUPPRESS + 1)] = 0.0
+    peaks.sort()
+    merged: list[list[float]] = []
+    for pos, mass in peaks:
+        if merged and pos - merged[-1][0] <= PROFILE_MERGE_FRAC * side:
+            prev_pos, prev_mass = merged[-1]
+            merged[-1] = [(prev_pos * prev_mass + pos * mass) / (prev_mass + mass), prev_mass + mass]
+        else:
+            merged.append([pos, mass])
+    return [(pos, mass) for pos, mass in merged]
 
 
-def _line_intersection(line_a: tuple[float, float], line_b: tuple[float, float]) -> np.ndarray | None:
-    """Intersection of two lines in normal form (theta, rho):
-    x*cos(theta) + y*sin(theta) = rho."""
-    theta_a, rho_a = line_a
-    theta_b, rho_b = line_b
-    det = np.cos(theta_a) * np.sin(theta_b) - np.cos(theta_b) * np.sin(theta_a)
-    if abs(det) < 1e-6:
+def _grid_borders(profile: np.ndarray, side: int) -> tuple[float, float] | None:
+    """(lo, hi) border positions of one grid family from its projection
+    profile: keeps peaks at least half as strong as the strongest (a
+    shadow streak or page edge is weaker than a full grid line) and
+    requires the 3x3 signature — at least two inner lines. The interior
+    requirement is also what rejects sub-grids: when a real outer line
+    escapes detection, an inner line gets promoted to border and the
+    resulting 3x2 quad rectifies "successfully" onto the wrong region —
+    worse than an honest not-found (seen live)."""
+    peaks = _profile_peaks(profile, side)
+    if len(peaks) < 4:
         return None
-    x = (rho_a * np.sin(theta_b) - rho_b * np.sin(theta_a)) / det
-    y = (np.cos(theta_a) * rho_b - np.cos(theta_b) * rho_a) / det
-    return np.array([x, y], dtype=np.float32)
-
-
-def _border_candidates(segments: list[tuple], side: int) -> tuple[list, list[float]]:
-    """Support-gated outer border candidates for one grid family:
-    (list of (lo, hi) line pairs in normal form, list of all cluster
-    rhos). Segments cluster by their own (theta, rho): pieces of one
-    physical border land together however thick or tilted the line is.
-    More than one candidate per side is returned when clusters pass the
-    gate — a strong shadow edge can out-vote a real grid line, and the
-    squareness/interior checks in detect_grid_lines arbitrate."""
-    if len(segments) < 2:
-        return [], []
-    members = sorted(segments, key=lambda s: s[1])  # by rho
-    total = sum(s[2] for s in members)
-
-    clusters = [[members[0]]]
-    for member in members[1:]:
-        if member[1] - clusters[-1][-1][1] > GRID_CLUSTER_GAP_FRAC * side:
-            clusters.append([])
-        clusters[-1].append(member)
-    if len(clusters) < 2:
-        return [], []
-
-    def fit(cluster: list[tuple]) -> tuple[float, float, float]:
-        weight = sum(s[2] for s in cluster)
-        theta = sum(s[0] * s[2] for s in cluster) / weight
-        rho = sum(s[1] * s[2] for s in cluster) / weight
-        return theta, rho, weight / total
-
-    fits = [fit(cluster) for cluster in clusters]
-    strongest = max(support for _, _, support in fits)
-    gated = [
-        (theta, rho) for theta, rho, support in fits
-        if support >= GRID_BORDER_MIN_SUPPORT and support >= GRID_BORDER_REL_SUPPORT * strongest
-    ]
-    if len(gated) < 2:
-        return [], [rho for _, rho, _ in fits]
-
-    candidates = []
-    los = gated[:2]
-    his = gated[-2:] if len(gated) > 2 else gated[-1:]
-    for lo in los:
-        for hi in his:
-            if hi[1] - lo[1] > GRID_CLUSTER_GAP_FRAC * side:  # genuinely two lines
-                candidates.append((lo, hi))
-    return candidates, [rho for _, rho, _ in fits]
+    strongest = max(mass for _, mass in peaks)
+    solid = [(pos, mass) for pos, mass in peaks if mass >= 0.5 * strongest]
+    if len(solid) - 2 < GRID_MIN_INTERIOR_LINES:
+        return None
+    positions = [pos for pos, _ in solid]
+    return positions[0], positions[-1]
 
 
 def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
-    """Last-resort board finding for a bare hand-drawn grid: finds the
-    two dominant ~90°-apart line directions, takes the outermost
-    supported line in each as a border, and returns the four border
-    intersections ordered TL,TR,BR,BL (compute_homography's role order).
-    None — never a guessed quad — when the scene has no convincing grid:
-    too few lines, no perpendicular family, weak borders, or a tiny/
-    degenerate intersection quad."""
+    """Last-resort board finding for a bare hand-drawn grid: estimates
+    the dominant line direction from Hough segments (the only thing
+    Hough is trusted with), then reads the actual line positions off
+    ink-projection profiles in a rotated copy — a wobbly pencil line
+    still contributes its full length to one peak. Returns the four
+    corners ordered TL,TR,BR,BL (compute_homography's role order), or
+    None — never a guessed quad — when the scene has no convincing 3x3
+    signature."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
     scale = 1.0
     small = gray
@@ -325,6 +305,7 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
 
     block = max(15, (side // 8) | 1)
     binary = cv2.adaptiveThreshold(small, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 5)
+
     min_len = GRID_MIN_LINE_LEN_FRAC * side
     lines = cv2.HoughLinesP(
         binary, 1, np.pi / 180,
@@ -335,76 +316,52 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
     if lines is None or len(lines) < 4:
         return None
 
-    segments = []
-    for x1, y1, x2, y2 in lines.reshape(-1, 4):
-        length = float(np.hypot(x2 - x1, y2 - y1))
-        angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180.0)
-        theta, rho = _normal_form(float(x1), float(y1), float(x2), float(y2))
-        segments.append((theta, rho, length, angle))
-
     # Dominant direction from a length-weighted angle histogram (smoothed
     # circularly so a family straddling the 0/180 wrap doesn't split).
     bins = int(180 / GRID_ANGLE_BIN_DEG)
     hist = np.zeros(bins)
-    for _, _, length, angle in segments:
+    angles: list[tuple[float, float]] = []
+    for x1, y1, x2, y2 in lines.reshape(-1, 4):
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180.0)
         hist[int(angle / GRID_ANGLE_BIN_DEG) % bins] += length
+        angles.append((angle, length))
     smooth = hist + np.roll(hist, 1) + np.roll(hist, -1)
     theta1 = (float(np.argmax(smooth)) + 0.5) * GRID_ANGLE_BIN_DEG
-    near = [(angle, length) for _, _, length, angle in segments if _angle_distance(angle, theta1) <= GRID_ANGLE_TOL_DEG]
+    near = [(angle, length) for angle, length in angles if _angle_distance(angle, theta1) <= GRID_ANGLE_TOL_DEG]
     if near:
         # Double-angle mean: line angles are 180-periodic.
         z = sum(length * np.exp(2j * np.radians(angle)) for angle, length in near)
         theta1 = float(np.degrees(np.angle(z) / 2) % 180.0)
-    theta2 = (theta1 + 90.0) % 180.0
 
-    fam1 = [s for s in segments if _angle_distance(s[3], theta1) <= GRID_ANGLE_TOL_DEG]
-    fam2 = [s for s in segments if _angle_distance(s[3], theta2) <= GRID_ANGLE_TOL_DEG]
-    cand1, rhos1 = _border_candidates(fam1, side)
-    cand2, rhos2 = _border_candidates(fam2, side)
-    if not cand1 or not cand2:
+    # Rotate so the dominant family is vertical, then read both families'
+    # line positions off the ink-projection profiles.
+    h, w = binary.shape
+    center = (w / 2.0, h / 2.0)
+    rotation = cv2.getRotationMatrix2D(center, theta1 - 90.0, 1.0)
+    rotated = cv2.warpAffine(binary, rotation, (w, h), borderValue=0)
+    verticals = _grid_borders(rotated.sum(axis=0) / 255.0, side)
+    horizontals = _grid_borders(rotated.sum(axis=1) / 255.0, side)
+    if verticals is None or horizontals is None:
+        return None
+    (x_lo, x_hi), (y_lo, y_hi) = verticals, horizontals
+
+    # A 3x3 grid's outer square stays square-ish under any sane camera
+    # angle; a shadow-edge pairing or a page edge can't say that.
+    if not GRID_SPACING_MIN <= (x_hi - x_lo) / (y_hi - y_lo) <= GRID_SPACING_MAX:
         return None
 
-    # Arbitrate between candidate border pairs. A strong shadow edge can
-    # out-vote a real border on support alone, so candidates are scored
-    # on grid properties a shadow can't fake: the family's spacings must
-    # be roughly square (a 3x3 grid's outer square stays within ~2.5x
-    # under any sane camera angle), and the quad must carry the 3x3
-    # signature — at least two inner lines in EACH family. The interior
-    # requirement is also what rejects sub-grids: when a real outer line
-    # is too faint or curved to detect, an inner line gets promoted to
-    # border and the resulting 3x2 quad rectifies "successfully" onto
-    # the wrong region — worse than an honest not-found (seen live).
-    best_quad: np.ndarray | None = None
-    best_key: tuple[float, float] | None = None
-    for lo1, hi1 in cand1:
-        spacing1 = hi1[1] - lo1[1]
-        for lo2, hi2 in cand2:
-            spacing2 = hi2[1] - lo2[1]
-            if not GRID_SPACING_MIN <= spacing1 / spacing2 <= GRID_SPACING_MAX:
-                continue
-            interior1 = sum(lo1[1] < r < hi1[1] for r in rhos1)
-            interior2 = sum(lo2[1] < r < hi2[1] for r in rhos2)
-            if interior1 < GRID_MIN_INTERIOR_LINES or interior2 < GRID_MIN_INTERIOR_LINES:
-                continue
-            points = []
-            for border_a in (lo1, hi1):
-                for border_b in (lo2, hi2):
-                    point = _line_intersection(border_a, border_b)
-                    if point is None:
-                        break
-                    points.append(point / scale)
-            if len(points) != 4:
-                continue
-            quad = _order_quad(np.array(points))
-            int_quad = quad.astype(np.int32)
-            area = cv2.contourArea(int_quad)
-            hull_area = cv2.contourArea(cv2.convexHull(int_quad))
-            if hull_area == 0 or area < MIN_GRID_QUAD_FRAC * frame_area or area / hull_area < 0.9:
-                continue
-            key = (float(interior1 + interior2), float(area))
-            if best_key is None or key > best_key:
-                best_quad, best_key = quad, key
-    return best_quad
+    corners = np.array([(x_lo, y_lo), (x_hi, y_lo), (x_hi, y_hi), (x_lo, y_hi)], dtype=np.float32)
+    inverse = cv2.invertAffineTransform(rotation)
+    quad = (inverse @ np.hstack([corners, np.ones((4, 1), dtype=np.float32)]).T).T
+    quad = _order_quad(quad / scale)
+
+    int_quad = quad.astype(np.int32)
+    area = cv2.contourArea(int_quad)
+    hull_area = cv2.contourArea(cv2.convexHull(int_quad))
+    if hull_area == 0 or area < MIN_GRID_QUAD_FRAC * frame_area or area / hull_area < 0.9:
+        return None
+    return quad
 
 
 def cell_bounds(
