@@ -50,12 +50,22 @@ def describe_line(line: tuple[int, int, int]) -> str:
     return _LINE_NAMES[line]
 
 
+_ENGINE = None
+
+
 def _speak_pyttsx3(text: str) -> None:
     import pyttsx3  # imported lazily: not needed at all with --no-voice
 
-    engine = pyttsx3.init()
-    engine.say(text)
-    engine.runAndWait()
+    global _ENGINE
+    if _ENGINE is None:
+        # One engine for the process: re-init per utterance costs ~0.5 s
+        # each time and, on the espeak driver, fires a stray ctypes
+        # callback into a garbage-collected engine (the "weakly-referenced
+        # object no longer exists" spam). The only caller is Speaker's
+        # single worker thread, so sharing one engine is safe here.
+        _ENGINE = pyttsx3.init()
+    _ENGINE.say(text)
+    _ENGINE.runAndWait()
 
 
 def _speak_say_command(text: str) -> None:
