@@ -140,7 +140,7 @@ A phone on a gooseneck or propped on a glass above the desk gives the best angle
 pytest
 ```
 
-Covers rules, decision (the agent never loses, proved exhaustively), board rectification and ink detection on synthetic frames, the TTS queue, the session state machine driven with synthetic observations, the escalation call against a mocked model, and a synthetic recording run through the replay pipeline — all camera-free.
+Covers rules, decision (the agent never loses, proved exhaustively), board rectification and ink detection on synthetic frames, the TTS queue, the session state machine driven with synthetic observations, the escalation call against a mocked model, a synthetic recording run through the replay pipeline, eval scoring against a hand-written label, and a complete synthetic game (calibration through a win/draw) driven through the real perception → session → decision pipeline — all camera-free. None of this is a substitute for the real thing: no test here has ever seen a real hand, pen, camera, or spoken word. That check is entirely on you — see [Quick start](#quick-start-about-10-minutes) and `NOTES.md`'s Known limits.
 
 Every game writes a JSONL event log to `sessions/<timestamp>/events.jsonl` (commits, questions, escalations with latency/cost, the final result), plus a snapshot frame at each of those moments under `sessions/<timestamp>/frames/`. Add `--record` to also save every raw camera frame + `manifest.jsonl` under `sessions/<timestamp>/raw/`, then replay it without a camera:
 
