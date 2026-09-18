@@ -243,6 +243,19 @@ TODO: add entries as they happen, same format. Likely candidates: threshold cali
 - **No inconsistency found between README's documented commands/flags and the actual CLI** (`--camera`, `--agent-first`, `--no-voice`, `--no-escalation`, `--record`, `--config` in `__main__.py`; `q`/`d`/`r`/`n` key handlers) — checked by grep against every `add_argument`/`ord(...)` call, not just by reading README's prose.
 - **Would change if:** Gad's real run finds README's steps don't match what he sees (a different error message, a step out of order) — then README gets corrected against what actually happened, same as any other doc fix, not left as a silent gap.
 
+#### Post-M7 review fixes: five real bugs found by a full code review before the camera session
+
+A line-level review of the merged code (branch `fix-review-findings`) found five bugs worth fixing before any real-camera session, all verified against source and covered by new tests where a test can exist without a camera:
+
+1. **The terminal move was never logged as a commit.** `_log_tick` classified the game-ending tick (board change + GAME_OVER in one beat) as only a `"result"`, so `metrics.py`'s commit-based accuracy never counted the winning move — every game capped at (N−1)/N. Now the terminal tick logs both a `"commit"` and a `"result"`. `tests/test_main.py` scores a full synthetic game's events end-to-end to pin this.
+2. **Camera reconnect could never recover.** The retry loop re-read the same dead `cv2.VideoCapture`; OpenCV doesn't hot-plug on `read()`. It now releases and re-opens the device each retry. Needs a real unplug to verify end-to-end.
+3. **Contested reads stalled the game in silence.** One `marked` + one `ambiguous` cell (a shadow beside a real mark — the most common real-world case), two ambiguous cells, or the agent's ink arriving with extra marks matched no state-machine branch: no commit, no escalation, no message, forever. `WAIT_HUMAN` now escalates any read with ≥2 candidates; `WAIT_AGENT_INK` generalizes the wrong-cell ask to several strays and asks out loud on persistent ambiguous noise. Eight regression tests in `test_session.py`.
+4. **A non-string model reply could crash the loop mid-game.** `_reply_text` passed the provider's `content` through unguarded; a list-of-parts reply raised in `_parse_cell_reply` outside `ask()`'s try/except. It now joins text parts and treats anything non-textual as "no answer."
+5. **`n` (new game) reused the old game's escalation budget and event log.** The spent `calls_made` survived, silently degrading later games to always-ask, and a second `"start"` merged two games into one `events.jsonl`. Each game now gets a fresh `Escalator` and its own `sessions/<timestamp>/` directory (suffixed on same-second collisions), printed at startup as README already claimed it was.
+
+- **Why fix before the camera session:** 1 and 5 would have corrupted the eval numbers M6 exists to produce; 3 was a guaranteed demo-freezer in real lighting; 2 and 4 turn recoverable moments into hangs/crashes.
+- **Tried and rejected:** routing `WAIT_AGENT_INK`'s contested reads through the vision-model escalation like `WAIT_HUMAN`'s — `_resolve_escalate` always commits the human symbol, so it can't resolve an agent-ink read; the page-based wrong-cell ask already covers resolution without new machinery.
+
 ---
 
 ## 3. What I tried and dropped

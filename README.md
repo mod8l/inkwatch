@@ -115,7 +115,8 @@ All defaults live in [`config.yaml`](config.yaml).
 |---|---|
 | Laptop webcam | Works if you can angle the screen down over the page; a small stand or stack of books helps. |
 | iPhone + Mac | Continuity Camera shows up as a normal camera. Try `--camera 1` if index 0 is the built-in one. |
-| Any phone | A webcam app (e.g. Camo, DroidCam, Iriun) exposes it as a camera or a stream URL for `--camera`. |
+| Android, any computer | Install **IP Webcam** (free), start its server on the same Wi-Fi, then `--camera http://<phone-ip>:8080/video`. No PC-side app needed — easiest option on Linux. |
+| iPhone + Linux/Windows | Continuity Camera is macOS-only. Use an app that streams MJPEG over Wi-Fi and pass its URL to `--camera` (same as Android above), or DroidCam's iOS app with its PC client, which creates a real camera device. |
 
 A phone on a gooseneck or propped on a glass above the desk gives the best angle.
 
