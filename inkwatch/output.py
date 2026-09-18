@@ -9,7 +9,8 @@ decides *what* to say, this module only says it and draws it.
 from __future__ import annotations
 
 import queue
-import subprocess
+# Only ever invoked below (_speak_say_command) with a fixed argv list, never a shell string.
+import subprocess  # nosec B404
 import sys
 import threading
 from typing import Callable
@@ -58,22 +59,25 @@ def _speak_pyttsx3(text: str) -> None:
 
 
 def _speak_say_command(text: str) -> None:
-    subprocess.run(["say", text], check=False, timeout=15)
+    # List-form argv (no shell=True) and a fixed macOS system command --
+    # not resolved from any untrusted input.
+    subprocess.run(["say", text], check=False, timeout=15)  # nosec
 
 
 def default_speak_fn(text: str) -> None:
     """Local OS TTS, pyttsx3 first, macOS `say` as a fallback if it
     misbehaves (CLAUDE.md "Stack"). Never raises: a broken TTS backend
     must not take down the frame loop or the game (O4 still shows the
-    text on the overlay regardless)."""
+    text on the overlay regardless) -- but a failure is still printed,
+    not swallowed silently, so it's visible when debugging."""
     try:
         _speak_pyttsx3(text)
     except Exception:
         if sys.platform == "darwin":
             try:
                 _speak_say_command(text)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"TTS fallback also failed: {exc}", file=sys.stderr)
 
 
 class Speaker:

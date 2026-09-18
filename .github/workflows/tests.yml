@@ -134,5 +134,12 @@ jobs:
       - name: Install bandit
         run: pip install bandit
 
+      # B101 (assert_used) is skipped project-wide: this codebase uses
+      # `assert` throughout session.py/escalation.py to document internal
+      # invariants already guaranteed by the calling code's control flow
+      # (e.g. "cell_marks is set because observation.stable was checked
+      # above"), never to validate untrusted input or enforce security
+      # boundaries -- see NOTES.md. Every other bandit check still runs
+      # and still gates the build.
       - name: Run bandit
-        run: bandit -r inkwatch tools
+        run: bandit -r inkwatch tools --skip B101
