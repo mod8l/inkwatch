@@ -763,3 +763,51 @@ def test_ambiguous_only_noise_during_agent_ink_asks_after_a_streak():
     assert asked.phase == Phase.ASK_HUMAN
     assert "can't tell" in asked.message.lower()
     assert session.target_cell == target  # still armed; not silently dropped
+
+
+# -- Overlay highlight hints (§6.3: spoken cells pair with a highlight) -----
+
+
+def test_wait_agent_ink_highlights_the_armed_target_cell():
+    session = _calibrated_session()
+    result = _commit_human_move(session, cell=0)
+
+    assert result.phase == Phase.WAIT_AGENT_INK
+    assert result.highlight_cells == frozenset({session.target_cell})
+
+
+def test_escalation_highlights_every_candidate_cell():
+    session = _calibrated_session()
+    two_marks = marks(c0="marked", c1="marked")
+
+    session.update(obs(cell_marks=two_marks, frame_ts=1.0), now=1.0)
+    result = session.update(obs(cell_marks=two_marks, frame_ts=2.0), now=2.0)
+
+    assert result.phase == Phase.ESCALATE
+    assert result.highlight_cells == frozenset({0, 1})
+
+
+def test_a_resync_mismatch_highlights_the_mismatched_cells():
+    session = _calibrated_session()
+    session.board = ("X", "X") + session.board[2:]  # session believes 0,1 are taken
+
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=1.0), now=1.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=2.0), now=2.0)
+    result = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=3.0), now=3.0)
+
+    assert result.phase == Phase.ASK_HUMAN
+    assert result.highlight_cells == frozenset({0, 1})
+
+
+def test_a_wrong_cell_mark_highlights_the_stray_cell():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    stray = next(i for i in range(9) if i != target and session.board[i] is None)
+    wrong = marks(**{f"c{stray}": "marked"})
+
+    session.update(obs(cell_marks=wrong, frame_ts=10.0), now=10.0)
+    result = session.update(obs(cell_marks=wrong, frame_ts=11.0), now=11.0)
+
+    assert result.phase == Phase.ASK_HUMAN
+    assert stray in result.highlight_cells

@@ -710,8 +710,10 @@ class Perceiver:
         self.cell_inset = cell_inset
         # The last rectified frame, for a caller's own display purposes
         # only (e.g. __main__.py's overlay) — never part of `Observation`,
-        # which never carries pixels to session.py.
+        # which never carries pixels to session.py. Same for the last
+        # grid_lines (display boxes that follow the real detected lines).
         self.last_rectified: np.ndarray | None = None
+        self.last_grid_lines: tuple[tuple[float, ...], tuple[float, ...]] | None = None
 
     def observe(
         self,
@@ -724,6 +726,7 @@ class Perceiver:
         now = time.monotonic() if now is None else now
         result = self.board.update(frame, now)
         self.last_rectified = result.rectified if result.found else None
+        self.last_grid_lines = result.grid_lines if result.found else None
         markers_visible = result.found and not result.reused
         stable, occluded = self.stability.update(
             result.rectified if result.found else None, markers_visible

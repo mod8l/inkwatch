@@ -312,6 +312,9 @@ def main(argv: list[str] | None = None) -> None:
                     confidence=result.confidence,
                     cell_marks=result.cell_marks,
                     debug=debug,
+                    grid_lines=perceiver.last_grid_lines,
+                    highlight_cells=result.highlight_cells,
+                    target_symbol=(result.turn if result.phase is Phase.WAIT_AGENT_INK else None),
                 )
                 cv2.imshow("inkwatch", rectified)
             else:

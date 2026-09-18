@@ -104,6 +104,12 @@ class SessionResult:
     # for the caller to run the actual model call against (M5). Empty
     # outside ESCALATE.
     escalation_cells: frozenset[int]
+    # Cells the overlay should emphasize so the human never has to
+    # decode speech alone: the armed target cell while the agent's mark
+    # is awaited, or every cell involved in an open question (escalation
+    # candidates, wrong-cell marks, resync mismatches). §6.3: spoken
+    # cells are always paired with a visible highlight.
+    highlight_cells: frozenset[int] = frozenset()
 
 
 def _new_marks(cell_marks: tuple[CellMark, ...], board: Board) -> tuple[list[int], list[int], list[int]]:
@@ -252,6 +258,12 @@ class Session:
             self._reset_recovery_debounce()
 
     def _result(self, cell_marks: tuple[CellMark, ...] | None, message: str | None) -> SessionResult:
+        if self.phase == Phase.WAIT_AGENT_INK and self.target_cell is not None:
+            highlight = frozenset({self.target_cell})
+        elif self.phase in (Phase.ESCALATE, Phase.ASK_HUMAN):
+            highlight = self._ask_cells
+        else:
+            highlight = frozenset()
         return SessionResult(
             phase=self.phase,
             board=self.board,
@@ -261,6 +273,7 @@ class Session:
             confidence=_CONFIDENCE_BY_PHASE.get(self.phase, "accepted"),
             cell_marks=cell_marks,
             escalation_cells=self._ask_cells if self.phase == Phase.ESCALATE else frozenset(),
+            highlight_cells=highlight,
         )
 
     # -- CALIBRATING ---------------------------------------------------
@@ -325,6 +338,7 @@ class Session:
 
         self.phase = Phase.ASK_HUMAN
         self._ask_context = "resync"
+        self._ask_cells = frozenset(mismatches)
         names = ", ".join(cell_name(c) for c in mismatches)
         return f"The page doesn't match what I have. Please check {names}."
 
@@ -557,6 +571,7 @@ class Session:
         self._wrong_cell_pending = None
         self.phase = Phase.ASK_HUMAN
         self._ask_context = "wrong_cell"
+        self._ask_cells = candidate
         assert self.target_cell is not None
         names = ", ".join(cell_name(c) for c in sorted(candidate))
         verb = "a mark" if len(candidate) == 1 else "marks"
@@ -581,6 +596,7 @@ class Session:
         self._stray_streak = 0
         self.phase = Phase.ASK_HUMAN
         self._ask_context = "wrong_cell"
+        self._ask_cells = frozenset(ambiguous)
         assert self.target_cell is not None
         names = ", ".join(cell_name(c) for c in sorted(ambiguous))
         if target_marked:
