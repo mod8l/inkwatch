@@ -163,7 +163,19 @@ class Escalator:
 
 
 def _reply_text(response: dict) -> str | None:
+    """The model's reply as plain text, or None if there isn't any.
+    OpenRouter-compatible APIs usually return a string `content`, but
+    some models return a list of typed parts instead — returning it
+    unguarded would make `_parse_cell_reply` call `.strip()` on a list
+    and raise outside `ask()`'s try/except, crashing the frame loop
+    mid-game. Anything that isn't text is "no answer", never an error."""
     try:
-        return response["choices"][0]["message"]["content"]
+        content = response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         return None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [part["text"] for part in content if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)]
+        return " ".join(parts) if parts else None
+    return None
