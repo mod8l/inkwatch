@@ -3,11 +3,12 @@
 Finds the four ArUco corner markers, computes the homography from the
 inner (board-facing) marker corners to a fixed-size top-down image, and
 warps the frame (P1, P2). When no markers decode — a hand-drawn board
-made without a printer — falls back to finding four solid black corner
-squares instead, feeding the same homography path. Divides the rectified
-board into 9 inset cells and measures ink per cell against an accepted
-baseline (P3, P4, D1). Gates evaluation on a stable, unoccluded scene
-(P5, P6).
+made without a printer — falls back down a ladder of hand-drawable
+references: four solid black corner squares, then a bare grid's outer
+lines (both shadow-tolerant, both feeding the same homography path).
+Divides the rectified board into 9 inset cells and measures ink per cell
+against an accepted baseline (P3, P4, D1). Gates evaluation on a stable,
+unoccluded scene (P5, P6).
 
 Perception never mutates game state. `Perceiver.observe()` is the one
 entry point session.py calls each frame: it takes the frame and session's
@@ -51,6 +52,11 @@ DEFAULT_INK_HIGH = 0.05
 DEFAULT_STABILITY_FRAMES = 10
 DEFAULT_MOTION_THRESHOLD = 2.0  # mean abs pixel diff (0-255) between consecutive rectified frames
 
+# Corner smoothing for the hand-drawn detection paths (their corner
+# estimates jitter; ArUco is subpixel-stable and never smoothed).
+SMOOTH_ALPHA = 0.35  # weight of the newest measurement
+SMOOTH_SNAP_FRAC = 0.10  # of the frame diagonal: a bigger jump is a real page move
+
 
 @dataclass
 class RectifyResult:
@@ -76,6 +82,22 @@ def detect_markers(
     return detected
 
 
+def _homography_from_points(src: np.ndarray, output_size: int) -> np.ndarray:
+    """Perspective transform from 4 role-ordered corner points
+    (top_left, top_right, bottom_right, bottom_left) to the rectified
+    top-down square."""
+    dst = np.array(
+        [
+            [0, 0],
+            [output_size - 1, 0],
+            [output_size - 1, output_size - 1],
+            [0, output_size - 1],
+        ],
+        dtype=np.float32,
+    )
+    return cv2.getPerspectiveTransform(np.asarray(src, dtype=np.float32), dst)
+
+
 def compute_homography(
     detected: dict[int, np.ndarray], output_size: int
 ) -> tuple[np.ndarray | None, list[str]]:
@@ -92,17 +114,7 @@ def compute_homography(
         [detected[mid][idx] for _, (mid, idx) in CORNER_ROLES.items()],
         dtype=np.float32,
     )
-    dst = np.array(
-        [
-            [0, 0],
-            [output_size - 1, 0],
-            [output_size - 1, output_size - 1],
-            [0, output_size - 1],
-        ],
-        dtype=np.float32,
-    )
-    homography = cv2.getPerspectiveTransform(src, dst)
-    return homography, []
+    return _homography_from_points(src, output_size), []
 
 
 # Blob fallback (D1's hand-drawn path, no printer and no ruler needed):
@@ -183,6 +195,153 @@ def detect_corner_squares(frame: np.ndarray) -> dict[int, np.ndarray]:
         3: quads[int(np.argmin(d))],  # bottom_left
     }
     return {mid: _order_quad(quad) for mid, quad in picked.items()}
+
+
+# Bare-grid fallback (a hand-drawn grid with no corner marks at all):
+# the two dominant perpendicular line families' outermost supported
+# lines. Shadow tolerance comes from adaptive thresholding (ink is
+# judged against its local neighborhood, so a smooth shadow gradient
+# neither fakes nor hides lines) plus the support requirement below —
+# a shadow's hard edge is shorter than a full grid line, so shadow
+# fragments can't outvote a real border.
+GRID_MIN_LINE_LEN_FRAC = 0.25  # a grid border spans at least this of the frame's small side
+GRID_ANGLE_BIN_DEG = 3.0
+GRID_ANGLE_TOL_DEG = 8.0
+GRID_CLUSTER_GAP_FRAC = 0.04  # rho clustering gap, fraction of the frame's small side
+GRID_BORDER_MIN_SUPPORT = 0.10  # an outer line needs at least this share of its family's total length...
+GRID_BORDER_REL_SUPPORT = 0.4  # ... and at least this share of the family's strongest cluster —
+# a real border is a substantial line; shadow fragments are neither. (A fixed absolute share
+# alone is fragile: Hough may return one segment or two for the same drawn line, halving the
+# measured support for an implementation reason, not a scene reason.)
+MIN_GRID_QUAD_FRAC = 0.15  # the four intersections must span this much of the frame
+
+
+def _angle_distance(a: float, b: float) -> float:
+    """180-periodic distance between two line angles, in degrees."""
+    return abs((a - b + 90.0) % 180.0 - 90.0)
+
+
+def _line_intersection(line_a: tuple[float, float], line_b: tuple[float, float]) -> np.ndarray | None:
+    """Intersection of two lines in normal form (theta, rho):
+    x*cos(theta) + y*sin(theta) = rho."""
+    theta_a, rho_a = line_a
+    theta_b, rho_b = line_b
+    det = np.cos(theta_a) * np.sin(theta_b) - np.cos(theta_b) * np.sin(theta_a)
+    if abs(det) < 1e-6:
+        return None
+    x = (rho_a * np.sin(theta_b) - rho_b * np.sin(theta_a)) / det
+    y = (np.cos(theta_a) * rho_b - np.cos(theta_b) * rho_a) / det
+    return np.array([x, y], dtype=np.float32)
+
+
+def _border_lines(segments: list[tuple], theta_deg: float, side: int) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The (inner-side, outer-side) pair of outermost supported lines of
+    one grid family, in normal form. None when the family doesn't have
+    two well-supported extremes."""
+    normal = np.radians((theta_deg + 90.0) % 180.0)
+    normal_vec = np.array([np.cos(normal), np.sin(normal)])
+    members = []
+    for x1, y1, x2, y2, length, _ in segments:
+        mid = np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0])
+        members.append((float(mid @ normal_vec), length))
+    if len(members) < 2:
+        return None
+    members.sort()
+    total = sum(length for _, length in members)
+
+    clusters = [[members[0]]]
+    for member in members[1:]:
+        if member[0] - clusters[-1][-1][0] > GRID_CLUSTER_GAP_FRAC * side:
+            clusters.append([])
+        clusters[-1].append(member)
+    if len(clusters) < 2:
+        return None
+
+    def fit(cluster: list[tuple[float, float]]) -> tuple[float, float, float]:
+        rho = sum(r * length for r, length in cluster) / sum(length for _, length in cluster)
+        support = sum(length for _, length in cluster) / total
+        return normal, rho, support
+
+    lo, hi = fit(clusters[0]), fit(clusters[-1])
+    strongest = max(fit(cluster)[2] for cluster in clusters)
+    for border in (lo, hi):
+        if border[2] < GRID_BORDER_MIN_SUPPORT or border[2] < GRID_BORDER_REL_SUPPORT * strongest:
+            return None
+    return (lo[0], lo[1]), (hi[0], hi[1])
+
+
+def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
+    """Last-resort board finding for a bare hand-drawn grid: finds the
+    two dominant ~90°-apart line directions, takes the outermost
+    supported line in each as a border, and returns the four border
+    intersections ordered TL,TR,BR,BL (compute_homography's role order).
+    None — never a guessed quad — when the scene has no convincing grid:
+    too few lines, no perpendicular family, weak borders, or a tiny/
+    degenerate intersection quad."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    scale = 1.0
+    small = gray
+    if min(gray.shape[:2]) > 480:
+        scale = 480.0 / min(gray.shape[:2])
+        small = cv2.resize(gray, None, fx=scale, fy=scale)
+    side = min(small.shape[:2])
+
+    block = max(15, (side // 8) | 1)
+    binary = cv2.adaptiveThreshold(small, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 5)
+    min_len = GRID_MIN_LINE_LEN_FRAC * side
+    lines = cv2.HoughLinesP(
+        binary, 1, np.pi / 180,
+        threshold=int(min_len * 0.6),
+        minLineLength=int(min_len),
+        maxLineGap=int(0.03 * side),
+    )
+    if lines is None or len(lines) < 4:
+        return None
+
+    segments = []
+    for x1, y1, x2, y2 in lines.reshape(-1, 4):
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180.0)
+        segments.append((float(x1), float(y1), float(x2), float(y2), length, angle))
+
+    # Dominant direction from a length-weighted angle histogram (smoothed
+    # circularly so a family straddling the 0/180 wrap doesn't split).
+    bins = int(180 / GRID_ANGLE_BIN_DEG)
+    hist = np.zeros(bins)
+    for *_, length, angle in segments:
+        hist[int(angle / GRID_ANGLE_BIN_DEG) % bins] += length
+    smooth = hist + np.roll(hist, 1) + np.roll(hist, -1)
+    theta1 = (float(np.argmax(smooth)) + 0.5) * GRID_ANGLE_BIN_DEG
+    near = [(a, l) for *_, l, a in segments if _angle_distance(a, theta1) <= GRID_ANGLE_TOL_DEG]
+    if near:
+        # Double-angle mean: line angles are 180-periodic.
+        z = sum(l * np.exp(2j * np.radians(a)) for a, l in near)
+        theta1 = float(np.degrees(np.angle(z) / 2) % 180.0)
+    theta2 = (theta1 + 90.0) % 180.0
+
+    fam1 = [s for s in segments if _angle_distance(s[5], theta1) <= GRID_ANGLE_TOL_DEG]
+    fam2 = [s for s in segments if _angle_distance(s[5], theta2) <= GRID_ANGLE_TOL_DEG]
+    borders1 = _border_lines(fam1, theta1, side) if fam1 else None
+    borders2 = _border_lines(fam2, theta2, side) if fam2 else None
+    if borders1 is None or borders2 is None:
+        return None
+
+    points = []
+    for border_a in borders1:
+        for border_b in borders2:
+            point = _line_intersection(border_a, border_b)
+            if point is None:
+                return None
+            points.append(point / scale)
+    quad = _order_quad(np.array(points))
+
+    int_quad = quad.astype(np.int32)
+    area = cv2.contourArea(int_quad)
+    hull_area = cv2.contourArea(cv2.convexHull(int_quad))
+    frame_area = gray.shape[0] * gray.shape[1]
+    if hull_area == 0 or area < MIN_GRID_QUAD_FRAC * frame_area or area / hull_area < 0.9:
+        return None
+    return quad
 
 
 def cell_bounds(
@@ -281,6 +440,21 @@ class BoardTracker:
         self._detector = cv2.aruco.ArucoDetector(self._dictionary, self._params)
         self._last_homography: np.ndarray | None = None
         self._last_seen: float | None = None
+        self._smooth_src: np.ndarray | None = None
+
+    def _smooth_corners(self, src: np.ndarray, frame: np.ndarray) -> np.ndarray:
+        """Hand-drawn detections (corner squares, grid lines) jitter a
+        few px frame to frame, and jitter in the rectified image looks
+        like motion to the stability gate (P5) — so EMA-smooth the corner
+        points. A jump beyond the snap distance (the page really moved)
+        is passed through unsmoothed instead of lagging behind it."""
+        if self._smooth_src is not None:
+            frame_diag = float(np.hypot(frame.shape[0], frame.shape[1]))
+            jumped = np.linalg.norm(src - self._smooth_src, axis=1).max() > SMOOTH_SNAP_FRAC * frame_diag
+            if not jumped:
+                src = SMOOTH_ALPHA * src + (1.0 - SMOOTH_ALPHA) * self._smooth_src
+        self._smooth_src = src
+        return src
 
     def update(self, frame: np.ndarray, now: float | None = None) -> RectifyResult:
         now = time.monotonic() if now is None else now
@@ -288,10 +462,20 @@ class BoardTracker:
         homography, missing = compute_homography(detected, self.output_size)
 
         if homography is None:
-            # D1's hand-drawn path: no markers decoded, so try four solid
-            # black corner squares instead. ArUco stays the primary,
-            # more precise path whenever both would decode.
-            homography, _ = compute_homography(detect_corner_squares(frame), self.output_size)
+            # Hand-drawn paths (D1's fallback ladder): four solid black
+            # corner squares first, then a bare grid's outer lines. ArUco
+            # stays the primary, more precise path whenever it decodes.
+            squares = detect_corner_squares(frame)
+            src: np.ndarray | None = None
+            if squares:
+                src = np.array(
+                    [squares[mid][idx] for _, (mid, idx) in CORNER_ROLES.items()],
+                    dtype=np.float32,
+                )
+            else:
+                src = detect_grid_lines(frame)
+            if src is not None:
+                homography = _homography_from_points(self._smooth_corners(src, frame), self.output_size)
 
         if homography is not None:
             self._last_homography = homography
@@ -310,6 +494,7 @@ class BoardTracker:
                     reused=True,
                 )
 
+        self._smooth_src = None
         return RectifyResult(found=False, rectified=None, missing_corners=missing)
 
     def _warp(self, frame: np.ndarray, homography: np.ndarray) -> np.ndarray:

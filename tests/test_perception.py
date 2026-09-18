@@ -466,3 +466,115 @@ def test_a_blank_desk_hallucinates_no_board():
     result = tracker.update(frame, now=1.0)
 
     assert not result.found
+
+
+# -- Bare-grid fallback: a hand-drawn grid with no corner marks at all ----
+#
+# The last rung of the detection ladder: find the grid's own outer lines
+# and intersect them. Must be shadow-tolerant (adaptive thresholding,
+# not a global cutoff) and must never hallucinate a grid from clutter.
+
+
+def make_line_frame(
+    *,
+    skew: bool = False,
+    omit: set[str] | None = None,
+    inner: bool = True,
+    shadow: bool = False,
+) -> np.ndarray:
+    """A white page with the 3x3 grid's lines drawn (bold, hand-style),
+    no corner marks. `omit` drops named outer lines; `shadow` overlays a
+    smooth diagonal shadow gradient; `skew` warps perspective."""
+    omit = omit or set()
+    frame = np.full((FRAME_SIZE, FRAME_SIZE, 3), 255, dtype=np.uint8)
+    bx, by = BOARD_ORIGIN
+    x1, y1 = bx + BOARD_SIDE, by + BOARD_SIDE
+
+    outer = {"left": bx, "right": x1, "top": by, "bottom": y1}
+    for i in range(4):
+        t = i / 3
+        vx = round(bx + BOARD_SIDE * t)
+        hy = round(by + BOARD_SIDE * t)
+        if not inner and i in (1, 2):
+            continue
+        if i in (0, 3):
+            key_v = "left" if i == 0 else "right"
+            key_h = "top" if i == 0 else "bottom"
+            if key_v in omit or key_h in omit:
+                continue
+        cv2.line(frame, (vx, by), (vx, y1), (0, 0, 0), 4)
+        cv2.line(frame, (bx, hy), (x1, hy), (0, 0, 0), 4)
+
+    if shadow:
+        ramp = np.linspace(0.55, 1.0, FRAME_SIZE, dtype=np.float32)
+        gradient = (ramp[None, :] + ramp[:, None]) / 2
+        frame = (frame * gradient[:, :, None]).astype(np.uint8)
+
+    if skew:
+        src = np.array(
+            [[0, 0], [FRAME_SIZE, 0], [FRAME_SIZE, FRAME_SIZE], [0, FRAME_SIZE]],
+            dtype=np.float32,
+        )
+        dst = np.array(
+            [[60, 40], [FRAME_SIZE - 20, 10], [FRAME_SIZE - 60, FRAME_SIZE - 30], [30, FRAME_SIZE - 50]],
+            dtype=np.float32,
+        )
+        warp = cv2.getPerspectiveTransform(src, dst)
+        frame = cv2.warpPerspective(frame, warp, (FRAME_SIZE, FRAME_SIZE), borderValue=(255, 255, 255))
+
+    return frame
+
+
+def test_a_bare_grid_rectifies_to_requested_size():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(), now=1.0)
+
+    assert result.found
+    assert result.rectified.shape == (600, 600, 3)
+
+
+def test_a_bare_grid_is_found_under_perspective_skew():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(skew=True), now=1.0)
+
+    assert result.found
+
+
+def test_a_bare_grid_is_found_under_a_shadow_gradient():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(shadow=True), now=1.0)
+
+    assert result.found
+
+
+def test_a_missing_outer_line_is_not_a_board():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(omit={"right"}), now=1.0)
+
+    assert not result.found
+
+
+def test_two_crossing_lines_alone_are_not_a_board():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(inner=False, omit={"right", "bottom"}), now=1.0)
+
+    assert not result.found
+
+
+def test_grid_detection_is_stable_enough_for_the_stability_gate():
+    """P5 needs N quiet frames: feed the same grid with small simulated
+    measurement jitter and confirm the smoothed rectification settles
+    instead of tripping the motion threshold forever."""
+    tracker = BoardTracker(output_size=600)
+    gate = StabilityGate(stability_frames=8)
+    base = make_line_frame()
+    rng = np.random.default_rng(7)
+
+    stable = False
+    for i in range(30):
+        jitter = rng.normal(0, 0.8, base.shape).astype(np.float32)
+        noisy = np.clip(base.astype(np.float32) + jitter, 0, 255).astype(np.uint8)
+        result = tracker.update(noisy, now=float(i))
+        assert result.found
+        stable, _ = gate.update(result.rectified, markers_visible=True)
+    assert stable
