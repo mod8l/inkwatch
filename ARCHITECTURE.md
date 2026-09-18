@@ -38,7 +38,7 @@ flowchart LR
   subgraph SHARED["Shared platform"]
     GW["Model gateway<br/>OpenRouter, timeout, per-game budget"]
     LOG["Event + frame log<br/>JSONL, replay harness"]
-    MET["Metrics<br/>escalation, desync, latency"]
+    MET["Metrics<br/>events.jsonl + a hand-written label -> §13.1's numbers"]
   end
 
   CAM --> SAMP --> RECT --> GATE --> DIFF --> CONF
@@ -57,10 +57,10 @@ flowchart LR
   VLM --- GW
   LLMP --- GW
   SM --> LOG
-  LOG -.-> MET
+  LOG --> MET
 
   classDef future stroke-dasharray: 5 4
-  class ASR,LLMP,PSPEC,MET future
+  class ASR,LLMP,PSPEC future
 ```
 
 ## 1. End-to-end flow

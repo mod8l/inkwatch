@@ -1,0 +1,16 @@
+# EXAMPLE ONLY -- not a real recorded game. Shows the schema
+# eval/README.md describes. inkwatch/metrics.py's tests use synthetic
+# data directly rather than this file; it's here for a human to copy
+# from when labeling a real sessions/<timestamp>/ recording.
+
+session_id: "20260101T120000"     # must match a real sessions/<timestamp> directory
+true_moves:
+  - cell: 4
+    hand_left_frame_ts: 12.840    # read off sessions/<id>/frames/commit_12.840.png
+  - cell: 0
+    hand_left_frame_ts: 27.103
+  - cell: 8
+    hand_left_frame_ts: 41.960
+false_trigger_commits: 0
+final_board: [O, null, null, null, X, null, null, null, X]
+notes: "happy path, no edge cases -- see a game with --record covering two marks / wrong cell / page bump / lingering hand / shadow for those"
