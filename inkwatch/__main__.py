@@ -94,6 +94,19 @@ def _make_escalator(config: dict, disabled_by_flag: bool) -> Escalator:
     )
 
 
+def _new_session_dir(log_dir: Path) -> Path:
+    """One directory per game, so each game's events.jsonl is scored on
+    its own by metrics.py. Two games started within the same second would
+    otherwise share a timestamp-named directory and interleave one log."""
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    session_dir = log_dir / stamp
+    n = 2
+    while session_dir.exists():
+        session_dir = log_dir / f"{stamp}-{n}"
+        n += 1
+    return session_dir
+
+
 class _Recorder:
     """L3: `--record`'s raw-frame writer — every frame perception sees,
     with a manifest `replay.py` can read back in order. A no-op when
@@ -217,8 +230,9 @@ def main(argv: list[str] | None = None) -> None:
     escalator = _make_escalator(config, disabled_by_flag=args.no_escalation)
     speaker = Speaker(enabled=voice)
 
-    session_id = datetime.now().strftime("%Y%m%dT%H%M%S")
-    session_dir = Path(config.get("log_dir", "sessions/")) / session_id
+    log_dir = Path(config.get("log_dir", "sessions/"))
+    session_dir = _new_session_dir(log_dir)
+    print(f"Logging this game to {session_dir}")
     logger = SessionLogger(session_dir, "events", enabled=True)
     recorder = _Recorder(session_dir if args.record else None)
 
@@ -319,7 +333,20 @@ def main(argv: list[str] | None = None) -> None:
             if key == ord("r"):
                 session.force_resync()
             if key == ord("n"):
+                # New game means a fresh Session AND a fresh per-game
+                # escalation budget, event log, and recording — reusing
+                # any of them silently merges two games into one metrics
+                # view (and leaves every later game with no model calls
+                # once the first game spent the budget).
+                logger.close()
+                recorder.close()
+                escalator.close()
                 session = _new_session(config, agent_first, ink_low, ink_high)
+                escalator = _make_escalator(config, disabled_by_flag=args.no_escalation)
+                session_dir = _new_session_dir(log_dir)
+                print(f"Logging this game to {session_dir}")
+                logger = SessionLogger(session_dir, "events", enabled=True)
+                recorder = _Recorder(session_dir if args.record else None)
                 prev_result = None
     finally:
         speaker.close()
