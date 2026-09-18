@@ -9,7 +9,8 @@ decides *what* to say, this module only says it and draws it.
 from __future__ import annotations
 
 import queue
-import subprocess
+# Only ever invoked below (_speak_say_command) with a fixed argv list, never a shell string.
+import subprocess  # nosec B404
 import sys
 import threading
 from typing import Callable
@@ -58,22 +59,25 @@ def _speak_pyttsx3(text: str) -> None:
 
 
 def _speak_say_command(text: str) -> None:
-    subprocess.run(["say", text], check=False, timeout=15)
+    # List-form argv (no shell=True) and a fixed macOS system command --
+    # not resolved from any untrusted input.
+    subprocess.run(["say", text], check=False, timeout=15)  # nosec
 
 
 def default_speak_fn(text: str) -> None:
     """Local OS TTS, pyttsx3 first, macOS `say` as a fallback if it
     misbehaves (CLAUDE.md "Stack"). Never raises: a broken TTS backend
     must not take down the frame loop or the game (O4 still shows the
-    text on the overlay regardless)."""
+    text on the overlay regardless) -- but a failure is still printed,
+    not swallowed silently, so it's visible when debugging."""
     try:
         _speak_pyttsx3(text)
     except Exception:
         if sys.platform == "darwin":
             try:
                 _speak_say_command(text)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"TTS fallback also failed: {exc}", file=sys.stderr)
 
 
 class Speaker:
@@ -144,8 +148,15 @@ def draw_overlay(
     color = _CONFIDENCE_COLOR.get(confidence, (200, 200, 200))
 
     for idx, (x0, y0, x1, y1) in enumerate(cell_bounds(size)):
-        box_color = (255, 180, 0) if idx == target_cell else color
-        thickness = 3 if idx == target_cell else 1
+        pending = cell_marks is not None and cell_marks[idx] != "none" and board[idx] is None
+        if idx == target_cell:
+            box_color, thickness = (255, 180, 0), 3
+        elif pending:
+            # §9 "two new marks at once": both candidate cells need to be
+            # visible on the overlay, not just in --debug's per-cell text.
+            box_color, thickness = (0, 255, 255), 2
+        else:
+            box_color, thickness = color, 1
         cv2.rectangle(rectified, (x0, y0), (x1, y1), box_color, thickness)
         symbol = board[idx]
         if symbol is not None:

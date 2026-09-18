@@ -161,12 +161,13 @@ stateDiagram-v2
   WAIT_HUMAN --> BOARD_LOST: markers missing > 0.5 s
   WAIT_AGENT_INK --> BOARD_LOST: markers missing > 0.5 s
   BOARD_LOST --> RESYNC: board found again
-  RESYNC --> WAIT_HUMAN: page matches state
+  RESYNC --> WAIT_HUMAN: page matches state, human's turn
+  RESYNC --> WAIT_AGENT_INK: page matches state, agent's turn
   RESYNC --> ASK_HUMAN: page differs from state
   GAME_OVER --> [*]
 ```
 
-`RESYNC` re-reads all nine cells after the page moves or is lost, because the baseline is no longer trustworthy.
+`RESYNC` re-reads all nine cells after the page moves or is lost, because the baseline is no longer trustworthy. It resumes whichever side's turn it already was — if the board was lost mid-`WAIT_AGENT_INK`, the agent's move is still armed and unconfirmed, so RESYNC re-arms the *same* target cell rather than picking a new one or waiting on the human for a move that isn't theirs to make.
 
 ## 9. Edge cases and required behavior
 
@@ -231,6 +232,7 @@ escalation:
   timeout_s: 3
   max_calls_per_game: 5
 reminder_s: [10, 20]
+occlusion_reminder_s: 15  # §9: how long a lingering hand waits before "Take your time..."
 record: false
 log_dir: sessions/
 ```
@@ -254,7 +256,7 @@ Eval set: at least 10 recorded games including deliberate edge cases (two marks,
 - [ ] Video includes at least one recovery (e.g., ambiguous or wrong-cell mark handled correctly).
 - [ ] Game fully playable with escalation disabled.
 - [ ] README gets a stranger to a running game in under ten minutes.
-- [ ] Rules and decision modules covered by unit tests; perception covered by at least one replay test.
+- [x] Rules and decision modules covered by unit tests; perception covered by at least one replay test (`tests/test_replay.py`, M5).
 - [ ] No secrets committed.
 - [ ] `ARCHITECTURE.md` one page, covering flow, services, shared vs per-tenant, failure.
 - [ ] Known limits documented honestly.

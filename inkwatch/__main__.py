@@ -1,7 +1,14 @@
-"""CLI entry point: wires perception, the session state machine, decision,
-and output into the live camera loop (M3, "playable loop... happy path
-only, no escalation"). `session.py`'s module docstring lists what's still
-open for M4/M5 — this loop doesn't add any recovery of its own.
+"""CLI entry point: wires perception, the session state machine,
+escalation, logging, and output into the live camera loop. `session.py`
+owns all of §9's recovery behavior (M4); this loop's own recovery job is
+narrower — the camera itself going away (§9 "Camera disconnects"), which
+happens below the perception layer and so isn't something an
+`Observation` can carry.
+
+Per-frame perception -> session (-> escalation) is `replay.py`'s
+`run_frame`, not duplicated here, so the live loop and the offline replay
+pipeline (L4) can never drift into two different implementations of the
+same step.
 
 Needs a real camera to run, so it can't be exercised by an automated test;
 see README.md for exactly what to try and what you should see.
@@ -10,13 +17,19 @@ see README.md for exactly what to try and what you should see.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
+import numpy as np
 import yaml
+from dotenv import load_dotenv
 
+from inkwatch.escalation import DEFAULT_MAX_CALLS_PER_GAME, DEFAULT_MODEL, DEFAULT_TIMEOUT_S, Escalator
+from inkwatch.events import Observation, SessionLogger
 from inkwatch.output import Speaker, draw_overlay
 from inkwatch.perception import (
     DEFAULT_CELL_INSET,
@@ -27,7 +40,11 @@ from inkwatch.perception import (
     Perceiver,
     StabilityGate,
 )
-from inkwatch.session import Session
+from inkwatch.replay import run_frame
+from inkwatch.session import DEFAULT_OCCLUSION_REMINDER_S, Phase, Session, SessionResult
+
+CAMERA_LOST_MESSAGE_S = 2.0  # §9: "Camera disconnects... No frames for 2 s"
+CAMERA_RETRY_S = 2.0  # §9: "Retry every 2 s"
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
@@ -46,14 +63,125 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-voice", action="store_true", help="Display only, no speech")
     parser.add_argument(
         "--no-escalation", action="store_true",
-        help="Never call the vision model (the only mode M3 supports anyway — escalation is M5)",
+        help="Never call the vision model, even with an API key configured; every low-confidence "
+        "read asks you directly instead (§9's own behavior for no model / no key)",
     )
-    parser.add_argument("--record", action="store_true", help="Save the raw stream for replay (not yet built, M5)")
+    parser.add_argument(
+        "--record", action="store_true",
+        help="Save every raw camera frame (+ a manifest) under log_dir, for `python -m inkwatch.replay` later",
+    )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to config.yaml")
     return parser.parse_args(argv)
 
 
+def _new_session(config: dict, agent_first: bool, ink_low: float, ink_high: float) -> Session:
+    return Session(
+        agent_first=agent_first,
+        reminder_s=tuple(config.get("reminder_s", (10, 20))),
+        occlusion_reminder_s=config.get("occlusion_reminder_s", DEFAULT_OCCLUSION_REMINDER_S),
+        ink_low=ink_low,
+        ink_high=ink_high,
+    )
+
+
+def _make_escalator(config: dict, disabled_by_flag: bool) -> Escalator:
+    cfg = config.get("escalation") or {}
+    return Escalator(
+        enabled=bool(cfg.get("enabled", True)) and not disabled_by_flag,
+        model=cfg.get("model", DEFAULT_MODEL),
+        timeout_s=float(cfg.get("timeout_s", DEFAULT_TIMEOUT_S)),
+        max_calls_per_game=int(cfg.get("max_calls_per_game", DEFAULT_MAX_CALLS_PER_GAME)),
+    )
+
+
+class _Recorder:
+    """L3: `--record`'s raw-frame writer — every frame perception sees,
+    with a manifest `replay.py` can read back in order. A no-op when
+    `--record` wasn't passed, so the hot path never touches the disk."""
+
+    def __init__(self, session_dir: Path | None) -> None:
+        self.enabled = session_dir is not None
+        self._count = 0
+        if not self.enabled:
+            return
+        self._session_dir = session_dir
+        (session_dir / "raw").mkdir(parents=True, exist_ok=True)
+        self._manifest = (session_dir / "manifest.jsonl").open("a", encoding="utf-8")
+
+    def record(self, frame: np.ndarray, frame_ts: float) -> None:
+        if not self.enabled:
+            return
+        rel_path = f"raw/{self._count:06d}.png"
+        cv2.imwrite(str(self._session_dir / rel_path), frame)
+        self._manifest.write(json.dumps({"frame_ts": frame_ts, "path": rel_path}) + "\n")
+        self._manifest.flush()
+        self._count += 1
+
+    def close(self) -> None:
+        if self.enabled:
+            self._manifest.close()
+
+
+def _save_frame(session_dir: Path, rectified: np.ndarray, tag: str, frame_ts: float) -> str:
+    """L2: a snapshot at a commit/escalation/question moment. Returns the
+    path (relative to `session_dir`) for the log record to reference."""
+    frames_dir = session_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    rel_path = f"frames/{tag}_{frame_ts:.3f}.png"
+    cv2.imwrite(str(session_dir / rel_path), rectified)
+    return rel_path
+
+
+def _log_tick(
+    logger: SessionLogger,
+    session_dir: Path,
+    rectified: np.ndarray | None,
+    prev: SessionResult | None,
+    result: SessionResult,
+    frame_ts: float,
+) -> None:
+    """L1: one JSONL line per frame that changed something worth keeping
+    -- a commit (board changed), a question (just entered ASK_HUMAN), or
+    the final result (GAME_OVER). Escalations are logged separately, right
+    where `run_frame` returns the real `EscalationOutcome` (latency,
+    cost) — by the time a result gets here, a resolved escalation has
+    already moved `phase` past `ESCALATE`, so this function would never
+    actually see it. Quiet, unchanged frames while just waiting aren't
+    logged; there can be thousands of those in a real game and they carry
+    no information the transitions around them don't already capture."""
+    board_changed = prev is not None and result.board != prev.board
+    phase_changed = prev is not None and result.phase != prev.phase
+    first_tick = prev is None
+    if not (first_tick or board_changed or (phase_changed and result.phase in (Phase.ASK_HUMAN, Phase.GAME_OVER))):
+        return
+
+    if first_tick:
+        event_type = "start"
+    else:
+        event_type = {
+            Phase.ASK_HUMAN: "question",
+            Phase.GAME_OVER: "result",
+        }.get(result.phase, "commit")
+
+    frame_path = None
+    if rectified is not None:
+        frame_path = _save_frame(session_dir, rectified, event_type, frame_ts)
+
+    logger.log(
+        event_type,
+        frame_ts=frame_ts,
+        phase=result.phase,
+        turn=result.turn,
+        board=result.board,
+        message=result.message,
+        confidence=result.confidence,
+        target_cell=result.target_cell,
+        frame_path=frame_path,
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
+    load_dotenv()  # CLAUDE.md: OPENROUTER_API_KEY only ever comes from .env
     args = parse_args(argv)
     config = load_config(Path(args.config))
 
@@ -62,9 +190,6 @@ def main(argv: list[str] | None = None) -> None:
         camera = int(camera)
     agent_first = args.agent_first if args.agent_first is not None else config.get("agent_first", False)
     voice = config.get("voice", True) and not args.no_voice
-
-    if args.record:
-        print("--record isn't built yet (M5); continuing without it.", file=sys.stderr)
 
     cap = cv2.VideoCapture(camera)
     if not cap.isOpened():
@@ -80,20 +205,68 @@ def main(argv: list[str] | None = None) -> None:
     )
     ink_low = config.get("ink_threshold_low", DEFAULT_INK_LOW)
     ink_high = config.get("ink_threshold_high", DEFAULT_INK_HIGH)
-    session = Session(agent_first=agent_first, reminder_s=tuple(config.get("reminder_s", (10, 20))))
+    session = _new_session(config, agent_first, ink_low, ink_high)
+    escalator = _make_escalator(config, disabled_by_flag=args.no_escalation)
     speaker = Speaker(enabled=voice)
+
+    session_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+    session_dir = Path(config.get("log_dir", "sessions/")) / session_id
+    logger = SessionLogger(session_dir, "events", enabled=True)
+    recorder = _Recorder(session_dir if args.record else None)
+
     debug = False
+    camera_lost_since: float | None = None
+    camera_lost_announced = False
+    prev_result: SessionResult | None = None
 
     try:
         while True:
             ok, frame = cap.read()
-            if not ok:
-                print("Camera read failed", file=sys.stderr)
-                break
-
             now = time.monotonic()
-            observation = perceiver.observe(frame, session.baseline, now=now, low=ink_low, high=ink_high)
-            result = session.update(observation, now)
+
+            if not ok:
+                # Below the perception layer entirely — there's no frame to
+                # build an Observation from, so BOARD_LOST is driven with a
+                # synthetic not-found one (§9: resumes via RESYNC once
+                # frames come back, same path as a bumped page).
+                if camera_lost_since is None:
+                    camera_lost_since = now
+                    camera_lost_announced = False
+                elif not camera_lost_announced and now - camera_lost_since >= CAMERA_LOST_MESSAGE_S:
+                    message = "I've lost the camera."
+                    print(message, file=sys.stderr)
+                    speaker.say(message)
+                    camera_lost_announced = True
+
+                session.update(
+                    Observation(
+                        frame_ts=now, found=False, stable=False, occluded=True,
+                        missing_corners=(), ratios=None, cell_marks=None,
+                    ),
+                    now,
+                )
+
+                banner = np.zeros((240, 320, 3), dtype=np.uint8)
+                cv2.putText(
+                    banner, "Camera disconnected -- retrying...", (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1,
+                )
+                cv2.imshow("inkwatch", banner)
+                if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                    break
+                time.sleep(CAMERA_RETRY_S)
+                continue
+
+            camera_lost_since = None
+            camera_lost_announced = False
+            recorder.record(frame, now)
+
+            observation, result, escalation_outcome = run_frame(
+                perceiver, session, frame, now,
+                escalator=escalator, ink_low=ink_low, ink_high=ink_high,
+            )
+            if escalation_outcome is not None:
+                logger.log("escalation", frame_ts=now, **vars(escalation_outcome))
 
             if result.message:
                 print(result.message)
@@ -101,6 +274,7 @@ def main(argv: list[str] | None = None) -> None:
 
             if perceiver.last_rectified is not None:
                 rectified = perceiver.last_rectified.copy()
+                _log_tick(logger, session_dir, rectified, prev_result, result, now)
                 draw_overlay(
                     rectified,
                     board=result.board,
@@ -113,6 +287,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 cv2.imshow("inkwatch", rectified)
             else:
+                _log_tick(logger, session_dir, None, prev_result, result, now)
                 banner = frame.copy()
                 text = "Board not found — " + (
                     ", ".join(observation.missing_corners) or "no markers"
@@ -120,13 +295,23 @@ def main(argv: list[str] | None = None) -> None:
                 cv2.putText(banner, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 cv2.imshow("inkwatch", banner)
 
+            prev_result = result
+
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
             if key == ord("d"):
                 debug = not debug
+            if key == ord("r"):
+                session.force_resync()
+            if key == ord("n"):
+                session = _new_session(config, agent_first, ink_low, ink_high)
+                prev_result = None
     finally:
         speaker.close()
+        escalator.close()
+        logger.close()
+        recorder.close()
         cap.release()
         cv2.destroyAllWindows()
 

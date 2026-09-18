@@ -80,7 +80,7 @@ The agent says *"I can see the board. You're X, you go first."* Then:
 1. Draw an **X** in any cell and move your hand away.
 2. The agent says which cell you played and where it will play, e.g. *"You played center. I'll take top left. Please draw an O there."*
 3. Draw the **O** where it asked. It confirms and it's your turn again.
-4. At the end it announces the result. (The re-read that checks the final page still matches its report is M4/G5 — not built yet; see `NOTES.md`.)
+4. At the end it announces the result, then re-reads the whole page once more (G5) — if it disagrees with what it just reported, it says so and names the cell.
 
 Cells are named by row (**top / middle / bottom**) and column (**left / center / right**). The middle cell is just **center**. The target cell is also highlighted on screen.
 
@@ -92,9 +92,9 @@ Cells are named by row (**top / middle / bottom**) and column (**left / center /
 |---|---|---|
 | `q` | Quit | Yes |
 | `d` | Toggle debug overlay (per-cell none/ambiguous/marked) | Yes |
-| `n` | New game (use a fresh sheet) | Not yet (M4) |
-| `r` | Force a full re-read of the board | Not yet (M4) |
-| `y` / `n` | Answer the agent's question, if it asks one you can't resolve on the page | Not yet (M4/M5) |
+| `n` | New game (use a fresh sheet) | Yes |
+| `r` | Force a full re-read of the board (RESYNC) | Yes |
+| `y` / spoken answer | Answer the agent's question, if it asks one you can't resolve on the page | Not built — deferred; see `NOTES.md`. Every question the agent can currently ask resolves through the page instead: fix what's on paper and the next stable read confirms or clears it. |
 
 ## Options
 
@@ -103,8 +103,8 @@ python -m inkwatch --agent-first        # agent plays X and opens
 python -m inkwatch --camera 1           # pick another camera index
 python -m inkwatch --camera <url>       # IP camera / phone stream
 python -m inkwatch --no-voice           # display only
-python -m inkwatch --no-escalation      # never call the vision model (currently the only mode there is; escalation is M5)
-python -m inkwatch --record             # save the raw stream for replay (accepted but not yet built, M5)
+python -m inkwatch --no-escalation      # never call the vision model, even with an API key set -- every low-confidence read asks you directly
+python -m inkwatch --record             # save every raw camera frame + a manifest under sessions/<id>/, for replay later
 ```
 
 All defaults live in [`config.yaml`](config.yaml).
@@ -140,9 +140,16 @@ A phone on a gooseneck or propped on a glass above the desk gives the best angle
 pytest
 ```
 
-Covers rules, decision (the agent never loses, proved exhaustively), board rectification and ink detection on synthetic frames, the TTS queue, and the session state machine driven with synthetic observations — all camera-free.
+Covers rules, decision (the agent never loses, proved exhaustively), board rectification and ink detection on synthetic frames, the TTS queue, the session state machine driven with synthetic observations, the escalation call against a mocked model, and a synthetic recording run through the replay pipeline — all camera-free.
 
-Recording and replay (`--record`, `python -m inkwatch.replay`) aren't built yet — that's M5. Once they are: replay re-runs perception + session on a saved stream without a camera, writing a fresh event log you can diff against the original, which is how threshold changes get checked against the same frames instead of new, uncontrolled games.
+Every game writes a JSONL event log to `sessions/<timestamp>/events.jsonl` (commits, questions, escalations with latency/cost, the final result), plus a snapshot frame at each of those moments under `sessions/<timestamp>/frames/`. Add `--record` to also save every raw camera frame + `manifest.jsonl` under `sessions/<timestamp>/raw/`, then replay it without a camera:
+
+```bash
+python -m inkwatch --record             # play a game; note the printed session timestamp
+python -m inkwatch.replay sessions/<timestamp>
+```
+
+This re-runs perception + session (+ escalation, if a key is set) over the exact same frames and writes `sessions/<timestamp>/replay.jsonl` — diff it against `events.jsonl`, or re-run with different `--ink-low`/`--ink-high`/`--stability-frames` to check a threshold change against a real, already-played game instead of a fresh, uncontrolled one.
 
 ## Measured results
 
