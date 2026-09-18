@@ -215,14 +215,20 @@ GRID_ANGLE_TOL_DEG = 8.0
 GRID_CLUSTER_GAP_FRAC = 0.035  # rho clustering gap, fraction of the frame's small side —
 # must absorb a thick, slightly-tilted line's spread (~14-17px at VGA) while staying well
 # below the distance between two grid lines (a third of the board)
-GRID_BORDER_MIN_SUPPORT = 0.10  # an outer line needs at least this share of its family's total length...
-GRID_BORDER_REL_SUPPORT = 0.4  # ... and at least this share of the family's strongest cluster —
-# a real border is a substantial line; shadow fragments are neither. (A fixed absolute share
-# alone is fragile: Hough may return one segment or two for the same drawn line, halving the
-# measured support for an implementation reason, not a scene reason.)
-MIN_GRID_QUAD_FRAC = 0.15  # the four intersections must span this much of the frame
+GRID_BORDER_MIN_SUPPORT = 0.06  # speckle floor: a border candidate needs at least this
+# share of its family's total length. Real discrimination (shadow edge vs. grid line)
+# lives in detect_grid_lines' squareness/interior arbitration, NOT here — a stricter
+# gate throws out real borders that are weak for scene reasons (wobbly, half in
+# shadow) while the strong shadow edge passes anyway (seen on the real desk frame).
+GRID_BORDER_REL_SUPPORT = 0.25  # ... and at least this share of the strongest cluster
+MIN_GRID_QUAD_FRAC = 0.10  # the four intersections must span this much of the frame —
+# below ~a 175px board at VGA the 9 inset cells get too small to measure ink in.
+# (Was 0.15, a pre-real-frame guess; the actual grid landed at 0.13 because a
+# parallelogram's area is less than its bounding box — anti-junk discrimination
+# comes from the squareness/interior checks, not this floor.)
 GRID_SPACING_MIN = 0.4  # the two families' border spacings must be this square-ish...
 GRID_SPACING_MAX = 2.5  # ... (a 3x3 grid's outer square, under any sane camera angle)
+GRID_MIN_INTERIOR_LINES = 2  # the 3x3 signature: two inner lines per family inside the quad
 
 
 def _angle_distance(a: float, b: float) -> float:
@@ -362,8 +368,12 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
     # out-vote a real border on support alone, so candidates are scored
     # on grid properties a shadow can't fake: the family's spacings must
     # be roughly square (a 3x3 grid's outer square stays within ~2.5x
-    # under any sane camera angle), and a real grid's quad has the
-    # grid's inner lines INSIDE it.
+    # under any sane camera angle), and the quad must carry the 3x3
+    # signature — at least two inner lines in EACH family. The interior
+    # requirement is also what rejects sub-grids: when a real outer line
+    # is too faint or curved to detect, an inner line gets promoted to
+    # border and the resulting 3x2 quad rectifies "successfully" onto
+    # the wrong region — worse than an honest not-found (seen live).
     best_quad: np.ndarray | None = None
     best_key: tuple[float, float] | None = None
     for lo1, hi1 in cand1:
@@ -371,6 +381,10 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
         for lo2, hi2 in cand2:
             spacing2 = hi2[1] - lo2[1]
             if not GRID_SPACING_MIN <= spacing1 / spacing2 <= GRID_SPACING_MAX:
+                continue
+            interior1 = sum(lo1[1] < r < hi1[1] for r in rhos1)
+            interior2 = sum(lo2[1] < r < hi2[1] for r in rhos2)
+            if interior1 < GRID_MIN_INTERIOR_LINES or interior2 < GRID_MIN_INTERIOR_LINES:
                 continue
             points = []
             for border_a in (lo1, hi1):
@@ -387,8 +401,7 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
             hull_area = cv2.contourArea(cv2.convexHull(int_quad))
             if hull_area == 0 or area < MIN_GRID_QUAD_FRAC * frame_area or area / hull_area < 0.9:
                 continue
-            interior = sum(lo1[1] < r < hi1[1] for r in rhos1) + sum(lo2[1] < r < hi2[1] for r in rhos2)
-            key = (float(interior), float(area))
+            key = (float(interior1 + interior2), float(area))
             if best_key is None or key > best_key:
                 best_quad, best_key = quad, key
     return best_quad
