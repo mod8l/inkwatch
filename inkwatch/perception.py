@@ -147,8 +147,13 @@ def detect_corner_squares(frame: np.ndarray) -> dict[int, np.ndarray]:
     a random dark object fails the squareness, darkness, or quad-span
     checks rather than hallucinating a board."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, dark = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    side = min(gray.shape[:2])
+    # Adaptive threshold, not Otsu: a corner square drawn inside a soft
+    # shadow must beat its LOCAL neighborhood. A global threshold picks
+    # the shadow itself as "dark" and the square merges into one giant
+    # shadow blob (seen on the real desk frame).
+    block = max(15, (side // 8) | 1)
+    dark = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 5)
     # Opening: drawn grid lines touch the corner squares and would merge
     # them into one giant contour — eroding a few px cuts the thin lines,
     # dilating restores the fat squares.
@@ -156,7 +161,7 @@ def detect_corner_squares(frame: np.ndarray) -> dict[int, np.ndarray]:
     contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     frame_area = gray.shape[0] * gray.shape[1]
-    frame_median = float(np.median(blurred))
+    frame_median = float(np.median(gray))
     candidates: list[tuple[float, np.ndarray]] = []
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -173,7 +178,7 @@ def detect_corner_squares(frame: np.ndarray) -> dict[int, np.ndarray]:
             continue
         mask = np.zeros_like(gray)
         cv2.drawContours(mask, [approx], -1, 255, -1)
-        if cv2.mean(blurred, mask=mask)[0] > BLOB_DARKER_THAN * frame_median:
+        if cv2.mean(gray, mask=mask)[0] > BLOB_DARKER_THAN * frame_median:
             continue
         candidates.append((area, approx.reshape(4, 2).astype(np.float32)))
 
@@ -207,18 +212,33 @@ def detect_corner_squares(frame: np.ndarray) -> dict[int, np.ndarray]:
 GRID_MIN_LINE_LEN_FRAC = 0.25  # a grid border spans at least this of the frame's small side
 GRID_ANGLE_BIN_DEG = 3.0
 GRID_ANGLE_TOL_DEG = 8.0
-GRID_CLUSTER_GAP_FRAC = 0.04  # rho clustering gap, fraction of the frame's small side
+GRID_CLUSTER_GAP_FRAC = 0.035  # rho clustering gap, fraction of the frame's small side —
+# must absorb a thick, slightly-tilted line's spread (~14-17px at VGA) while staying well
+# below the distance between two grid lines (a third of the board)
 GRID_BORDER_MIN_SUPPORT = 0.10  # an outer line needs at least this share of its family's total length...
 GRID_BORDER_REL_SUPPORT = 0.4  # ... and at least this share of the family's strongest cluster —
 # a real border is a substantial line; shadow fragments are neither. (A fixed absolute share
 # alone is fragile: Hough may return one segment or two for the same drawn line, halving the
 # measured support for an implementation reason, not a scene reason.)
 MIN_GRID_QUAD_FRAC = 0.15  # the four intersections must span this much of the frame
+GRID_SPACING_MIN = 0.4  # the two families' border spacings must be this square-ish...
+GRID_SPACING_MAX = 2.5  # ... (a 3x3 grid's outer square, under any sane camera angle)
 
 
 def _angle_distance(a: float, b: float) -> float:
     """180-periodic distance between two line angles, in degrees."""
     return abs((a - b + 90.0) % 180.0 - 90.0)
+
+
+def _normal_form(x1: float, y1: float, x2: float, y2: float) -> tuple[float, float]:
+    """A segment's own line in normal form (theta, rho), theta in
+    [0, pi), rho signed — OpenCV HoughLines' convention, unique per
+    line. Segments cut from the same physical line — thick, tilted,
+    broken — land at nearly the same (theta, rho) even when their
+    midpoints are scattered along the line, which is what makes
+    clustering robust."""
+    theta = float(np.arctan2(y2 - y1, x2 - x1) + np.pi / 2) % np.pi
+    return theta, x1 * np.cos(theta) + y1 * np.sin(theta)
 
 
 def _line_intersection(line_a: tuple[float, float], line_b: tuple[float, float]) -> np.ndarray | None:
@@ -234,40 +254,50 @@ def _line_intersection(line_a: tuple[float, float], line_b: tuple[float, float])
     return np.array([x, y], dtype=np.float32)
 
 
-def _border_lines(segments: list[tuple], theta_deg: float, side: int) -> tuple[tuple[float, float], tuple[float, float]] | None:
-    """The (inner-side, outer-side) pair of outermost supported lines of
-    one grid family, in normal form. None when the family doesn't have
-    two well-supported extremes."""
-    normal = np.radians((theta_deg + 90.0) % 180.0)
-    normal_vec = np.array([np.cos(normal), np.sin(normal)])
-    members = []
-    for x1, y1, x2, y2, length, _ in segments:
-        mid = np.array([(x1 + x2) / 2.0, (y1 + y2) / 2.0])
-        members.append((float(mid @ normal_vec), length))
-    if len(members) < 2:
-        return None
-    members.sort()
-    total = sum(length for _, length in members)
+def _border_candidates(segments: list[tuple], side: int) -> tuple[list, list[float]]:
+    """Support-gated outer border candidates for one grid family:
+    (list of (lo, hi) line pairs in normal form, list of all cluster
+    rhos). Segments cluster by their own (theta, rho): pieces of one
+    physical border land together however thick or tilted the line is.
+    More than one candidate per side is returned when clusters pass the
+    gate — a strong shadow edge can out-vote a real grid line, and the
+    squareness/interior checks in detect_grid_lines arbitrate."""
+    if len(segments) < 2:
+        return [], []
+    members = sorted(segments, key=lambda s: s[1])  # by rho
+    total = sum(s[2] for s in members)
 
     clusters = [[members[0]]]
     for member in members[1:]:
-        if member[0] - clusters[-1][-1][0] > GRID_CLUSTER_GAP_FRAC * side:
+        if member[1] - clusters[-1][-1][1] > GRID_CLUSTER_GAP_FRAC * side:
             clusters.append([])
         clusters[-1].append(member)
     if len(clusters) < 2:
-        return None
+        return [], []
 
-    def fit(cluster: list[tuple[float, float]]) -> tuple[float, float, float]:
-        rho = sum(r * length for r, length in cluster) / sum(length for _, length in cluster)
-        support = sum(length for _, length in cluster) / total
-        return normal, rho, support
+    def fit(cluster: list[tuple]) -> tuple[float, float, float]:
+        weight = sum(s[2] for s in cluster)
+        theta = sum(s[0] * s[2] for s in cluster) / weight
+        rho = sum(s[1] * s[2] for s in cluster) / weight
+        return theta, rho, weight / total
 
-    lo, hi = fit(clusters[0]), fit(clusters[-1])
-    strongest = max(fit(cluster)[2] for cluster in clusters)
-    for border in (lo, hi):
-        if border[2] < GRID_BORDER_MIN_SUPPORT or border[2] < GRID_BORDER_REL_SUPPORT * strongest:
-            return None
-    return (lo[0], lo[1]), (hi[0], hi[1])
+    fits = [fit(cluster) for cluster in clusters]
+    strongest = max(support for _, _, support in fits)
+    gated = [
+        (theta, rho) for theta, rho, support in fits
+        if support >= GRID_BORDER_MIN_SUPPORT and support >= GRID_BORDER_REL_SUPPORT * strongest
+    ]
+    if len(gated) < 2:
+        return [], [rho for _, rho, _ in fits]
+
+    candidates = []
+    los = gated[:2]
+    his = gated[-2:] if len(gated) > 2 else gated[-1:]
+    for lo in los:
+        for hi in his:
+            if hi[1] - lo[1] > GRID_CLUSTER_GAP_FRAC * side:  # genuinely two lines
+                candidates.append((lo, hi))
+    return candidates, [rho for _, rho, _ in fits]
 
 
 def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
@@ -285,6 +315,7 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
         scale = 480.0 / min(gray.shape[:2])
         small = cv2.resize(gray, None, fx=scale, fy=scale)
     side = min(small.shape[:2])
+    frame_area = gray.shape[0] * gray.shape[1]
 
     block = max(15, (side // 8) | 1)
     binary = cv2.adaptiveThreshold(small, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 5)
@@ -302,46 +333,65 @@ def detect_grid_lines(frame: np.ndarray) -> np.ndarray | None:
     for x1, y1, x2, y2 in lines.reshape(-1, 4):
         length = float(np.hypot(x2 - x1, y2 - y1))
         angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180.0)
-        segments.append((float(x1), float(y1), float(x2), float(y2), length, angle))
+        theta, rho = _normal_form(float(x1), float(y1), float(x2), float(y2))
+        segments.append((theta, rho, length, angle))
 
     # Dominant direction from a length-weighted angle histogram (smoothed
     # circularly so a family straddling the 0/180 wrap doesn't split).
     bins = int(180 / GRID_ANGLE_BIN_DEG)
     hist = np.zeros(bins)
-    for *_, length, angle in segments:
+    for _, _, length, angle in segments:
         hist[int(angle / GRID_ANGLE_BIN_DEG) % bins] += length
     smooth = hist + np.roll(hist, 1) + np.roll(hist, -1)
     theta1 = (float(np.argmax(smooth)) + 0.5) * GRID_ANGLE_BIN_DEG
-    near = [(a, l) for *_, l, a in segments if _angle_distance(a, theta1) <= GRID_ANGLE_TOL_DEG]
+    near = [(angle, length) for _, _, length, angle in segments if _angle_distance(angle, theta1) <= GRID_ANGLE_TOL_DEG]
     if near:
         # Double-angle mean: line angles are 180-periodic.
-        z = sum(l * np.exp(2j * np.radians(a)) for a, l in near)
+        z = sum(length * np.exp(2j * np.radians(angle)) for angle, length in near)
         theta1 = float(np.degrees(np.angle(z) / 2) % 180.0)
     theta2 = (theta1 + 90.0) % 180.0
 
-    fam1 = [s for s in segments if _angle_distance(s[5], theta1) <= GRID_ANGLE_TOL_DEG]
-    fam2 = [s for s in segments if _angle_distance(s[5], theta2) <= GRID_ANGLE_TOL_DEG]
-    borders1 = _border_lines(fam1, theta1, side) if fam1 else None
-    borders2 = _border_lines(fam2, theta2, side) if fam2 else None
-    if borders1 is None or borders2 is None:
+    fam1 = [s for s in segments if _angle_distance(s[3], theta1) <= GRID_ANGLE_TOL_DEG]
+    fam2 = [s for s in segments if _angle_distance(s[3], theta2) <= GRID_ANGLE_TOL_DEG]
+    cand1, rhos1 = _border_candidates(fam1, side)
+    cand2, rhos2 = _border_candidates(fam2, side)
+    if not cand1 or not cand2:
         return None
 
-    points = []
-    for border_a in borders1:
-        for border_b in borders2:
-            point = _line_intersection(border_a, border_b)
-            if point is None:
-                return None
-            points.append(point / scale)
-    quad = _order_quad(np.array(points))
-
-    int_quad = quad.astype(np.int32)
-    area = cv2.contourArea(int_quad)
-    hull_area = cv2.contourArea(cv2.convexHull(int_quad))
-    frame_area = gray.shape[0] * gray.shape[1]
-    if hull_area == 0 or area < MIN_GRID_QUAD_FRAC * frame_area or area / hull_area < 0.9:
-        return None
-    return quad
+    # Arbitrate between candidate border pairs. A strong shadow edge can
+    # out-vote a real border on support alone, so candidates are scored
+    # on grid properties a shadow can't fake: the family's spacings must
+    # be roughly square (a 3x3 grid's outer square stays within ~2.5x
+    # under any sane camera angle), and a real grid's quad has the
+    # grid's inner lines INSIDE it.
+    best_quad: np.ndarray | None = None
+    best_key: tuple[float, float] | None = None
+    for lo1, hi1 in cand1:
+        spacing1 = hi1[1] - lo1[1]
+        for lo2, hi2 in cand2:
+            spacing2 = hi2[1] - lo2[1]
+            if not GRID_SPACING_MIN <= spacing1 / spacing2 <= GRID_SPACING_MAX:
+                continue
+            points = []
+            for border_a in (lo1, hi1):
+                for border_b in (lo2, hi2):
+                    point = _line_intersection(border_a, border_b)
+                    if point is None:
+                        break
+                    points.append(point / scale)
+            if len(points) != 4:
+                continue
+            quad = _order_quad(np.array(points))
+            int_quad = quad.astype(np.int32)
+            area = cv2.contourArea(int_quad)
+            hull_area = cv2.contourArea(cv2.convexHull(int_quad))
+            if hull_area == 0 or area < MIN_GRID_QUAD_FRAC * frame_area or area / hull_area < 0.9:
+                continue
+            interior = sum(lo1[1] < r < hi1[1] for r in rhos1) + sum(lo2[1] < r < hi2[1] for r in rhos2)
+            key = (float(interior), float(area))
+            if best_key is None or key > best_key:
+                best_quad, best_key = quad, key
+    return best_quad
 
 
 def cell_bounds(
