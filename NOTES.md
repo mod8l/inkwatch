@@ -256,6 +256,16 @@ A line-level review of the merged code (branch `fix-review-findings`) found five
 - **Why fix before the camera session:** 1 and 5 would have corrupted the eval numbers M6 exists to produce; 3 was a guaranteed demo-freezer in real lighting; 2 and 4 turn recoverable moments into hangs/crashes.
 - **Tried and rejected:** routing `WAIT_AGENT_INK`'s contested reads through the vision-model escalation like `WAIT_HUMAN`'s — `_resolve_escalate` always commits the human symbol, so it can't resolve an agent-ink read; the page-based wrong-cell ask already covers resolution without new machinery.
 
+#### Hand-drawn boards: four solid black corner squares as the no-printer fallback — still no model
+
+- **The situation:** Gad has no printer and no ruler, so the printed marker sheet (D1) can't be produced, and precisely-drawn ArUco patterns (6×6 cells of 6 mm) aren't realistically hand-drawable. His first suggestion was "use some object detection model."
+- **Why not a model:** a VLM or detector on the board-finding hot path means 1–3 s latency per frame, real cost per game, a hard network dependency, and no pretrained class for "hand-drawn tic-tac-toe grid" — training one is exactly what the brief says shouldn't be needed. The failure mode was never "finding a grid needs intelligence"; it's "the markers are hard to draw." So change what's drawn, not what thinks.
+- **Chosen:** `detect_corner_squares` in `perception.py` — when no ArUco markers decode, find four solid black squares at the grid corners (Otsu threshold → morphological opening to detach touching grid lines → squareness/darkness/quad-span filters) and feed the same `compute_homography` path in the same `{id: corners}` shape, so nothing downstream changes. A filled square is drawable freehand in seconds. ArUco stays the primary path whenever both would decode (more precise, rotation-identified corners).
+- **Considered:** D1's original fallback sketch (largest-quadrilateral contour for the outer border + Hough line detection for the inner grid). Rejected: full-length straight lines are the *hardest* thing to draw by hand and the most fragile thing to detect under shadows; corner squares are the easiest to draw and the detection is trivial.
+- **Anti-hallucination guards:** a candidate must be a convex quad, fill ≥75% of its bounding box, be ≥30% darker than the frame median, and the four centers must span ≥15% of the frame — a blank desk or a phone lying nearby produces "not found," never a phantom board (pinned by tests).
+- **Would change if:** real-camera testing shows shadows producing four qualifying blobs (then require the quad to be closer to square), or Gad eventually prints the sheet, in which case this path simply never fires.
+
+
 ---
 
 ## 3. What I tried and dropped
@@ -274,7 +284,7 @@ Stated up front; to be confirmed or corrected after testing.
 
 | Limit | Why it exists | What it would take |
 |---|---|---|
-| Needs the printed marker sheet | D1: deterministic rectification over robustness to arbitrary grids | Contour + line-based grid finding as a fallback path |
+| Best with the printed marker sheet | D1: ArUco corners are more precise and rotation-identified; hand-drawn boards use four solid black corner squares instead (built, `detect_corner_squares`) | Nothing for daily use — contour + line-based grid finding with no corner marks at all remains future work |
 | Faint pencil is unreliable | Ink ratio in the ambiguous band; escalates or asks often | Per-session calibration from the first marks; stronger local contrast normalization |
 | Strong side lighting and hand shadows | Shadows change pixel darkness like ink does | Compare against baseline in a lighting-normalized space; shadow-invariant features |
 | Erasing a mark is treated as an error, not a move | Assumption A5: marks only get added | Region-state perception (full re-read per turn), as needed for chess/checkers |

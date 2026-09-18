@@ -46,7 +46,7 @@ python tools/make_sheet.py
 
 This writes `assets/board.png`: a US Letter page with a 3×3 grid and a black ArUco marker square in each corner. The markers are how the agent finds the board, so keep all four visible and uncovered. Print it at 100% scale (not "fit to page") and check the 1-inch mark on the sheet against a real ruler — the sheet is a PNG rather than a PDF (see `NOTES.md`), so your print dialog's scale isn't guaranteed automatically.
 
-No printer? Open the PNG full-screen on a tablet laid flat and play with a stylus, or draw marks on a sheet of tracing paper over it.
+No printer? Either open the PNG full-screen on a tablet laid flat and play with a stylus, or **draw the board by hand** — no ruler or marker patterns needed: a 3×3 grid (about a hand-span square) with a solid black filled square at each corner, each square's inner corner touching the grid's corner. The layout and exact rules are in [`assets/hand_template.png`](assets/hand_template.png). The agent finds the four black squares when no printed markers decode (see `NOTES.md`, hand-drawn fallback).
 
 ### 4. Position the camera
 Put the camera above the page, looking down, ideally no more than about 35° off vertical. The whole sheet should fill most of the frame with some margin. Avoid a lamp directly behind you that casts your hand's shadow onto the page.

@@ -380,3 +380,89 @@ def test_perceiver_classifies_cell_marks_against_the_supplied_baseline():
     assert observation.stable
     assert observation.cell_marks is not None
     assert all(mark == "none" for mark in observation.cell_marks)
+
+
+# -- Hand-drawn board fallback: four solid black corner squares -----------
+#
+# When no ArUco markers decode (a board drawn by hand, no printer and no
+# ruler), BoardTracker falls back to detecting four filled black squares
+# at the grid corners and feeds the same homography path.
+
+
+def make_blob_frame(*, skew: bool = False, omit: set[str] | None = None, grid: bool = False) -> np.ndarray:
+    """A white frame with solid black squares at the known marker spots,
+    optionally with the 3x3 grid drawn between their inner corners."""
+    omit = omit or set()
+    frame = np.full((FRAME_SIZE, FRAME_SIZE, 3), 255, dtype=np.uint8)
+
+    for name, (x, y) in _marker_positions().items():
+        if name in omit:
+            continue
+        cv2.rectangle(frame, (x, y), (x + MARKER_SIDE, y + MARKER_SIDE), (0, 0, 0), -1)
+
+    if grid:
+        bx, by = BOARD_ORIGIN
+        x0, y0 = bx + MARKER_SIDE, by + MARKER_SIDE
+        x1 = bx + BOARD_SIDE - MARKER_SIDE
+        y1 = by + BOARD_SIDE - MARKER_SIDE
+        cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 0), 2)
+        for i in (1, 2):
+            gx = x0 + (x1 - x0) * i // 3
+            gy = y0 + (y1 - y0) * i // 3
+            cv2.line(frame, (gx, y0), (gx, y1), (0, 0, 0), 2)
+            cv2.line(frame, (x0, gy), (x1, gy), (0, 0, 0), 2)
+
+    if skew:
+        src = np.array(
+            [[0, 0], [FRAME_SIZE, 0], [FRAME_SIZE, FRAME_SIZE], [0, FRAME_SIZE]],
+            dtype=np.float32,
+        )
+        dst = np.array(
+            [[60, 40], [FRAME_SIZE - 20, 10], [FRAME_SIZE - 60, FRAME_SIZE - 30], [30, FRAME_SIZE - 50]],
+            dtype=np.float32,
+        )
+        warp = cv2.getPerspectiveTransform(src, dst)
+        frame = cv2.warpPerspective(frame, warp, (FRAME_SIZE, FRAME_SIZE), borderValue=(255, 255, 255))
+
+    return frame
+
+
+def test_four_black_squares_rectify_to_requested_size():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(), now=1.0)
+
+    assert result.found
+    assert result.rectified.shape == (600, 600, 3)
+
+
+def test_black_squares_found_under_perspective_skew():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(skew=True), now=1.0)
+
+    assert result.found
+    assert result.rectified.shape == (600, 600, 3)
+
+
+def test_drawn_grid_lines_do_not_break_square_detection():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(grid=True), now=1.0)
+
+    assert result.found
+
+
+def test_three_black_squares_is_not_a_board():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(omit={"bottom_right"}), now=1.0)
+
+    assert not result.found
+    assert result.rectified is None
+
+
+def test_a_blank_desk_hallucinates_no_board():
+    tracker = BoardTracker(output_size=600)
+    frame = np.full((FRAME_SIZE, FRAME_SIZE, 3), 255, dtype=np.uint8)
+    # one dark object that is not square (a phone lying on the desk)
+    cv2.rectangle(frame, (100, 700), (300, 780), (0, 0, 0), -1)
+    result = tracker.update(frame, now=1.0)
+
+    assert not result.found

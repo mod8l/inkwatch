@@ -2,9 +2,12 @@
 
 Finds the four ArUco corner markers, computes the homography from the
 inner (board-facing) marker corners to a fixed-size top-down image, and
-warps the frame (P1, P2). Divides the rectified board into 9 inset cells
-and measures ink per cell against an accepted baseline (P3, P4, D1).
-Gates evaluation on a stable, unoccluded scene (P5, P6).
+warps the frame (P1, P2). When no markers decode — a hand-drawn board
+made without a printer — falls back to finding four solid black corner
+squares instead, feeding the same homography path. Divides the rectified
+board into 9 inset cells and measures ink per cell against an accepted
+baseline (P3, P4, D1). Gates evaluation on a stable, unoccluded scene
+(P5, P6).
 
 Perception never mutates game state. `Perceiver.observe()` is the one
 entry point session.py calls each frame: it takes the frame and session's
@@ -100,6 +103,86 @@ def compute_homography(
     )
     homography = cv2.getPerspectiveTransform(src, dst)
     return homography, []
+
+
+# Blob fallback (D1's hand-drawn path, no printer and no ruler needed):
+# four solid black squares at the grid corners. Thresholds are fractions
+# of the frame so any camera resolution works.
+BLOB_MIN_AREA_FRAC = 0.001  # a corner square is at least this much of the frame
+BLOB_MAX_AREA_FRAC = 0.05  # ... and at most this (a shadow is bigger)
+BLOB_MIN_EXTENT = 0.75  # a filled square fills its bounding box
+BLOB_DARKER_THAN = 0.7  # blob mean must be this much darker than the frame median
+MIN_CORNER_QUAD_FRAC = 0.15  # the four corner centers must span this much of the frame
+
+
+def _order_quad(points: np.ndarray) -> np.ndarray:
+    """4 (x, y) points -> TL, TR, BR, BL order, the ArUco corner
+    convention compute_homography's CORNER_ROLES indices rely on."""
+    s = points.sum(axis=1)
+    d = points[:, 0] - points[:, 1]
+    return np.array(
+        [points[np.argmin(s)], points[np.argmax(d)], points[np.argmax(s)], points[np.argmin(d)]],
+        dtype=np.float32,
+    )
+
+
+def detect_corner_squares(frame: np.ndarray) -> dict[int, np.ndarray]:
+    """Hand-drawn fallback when no ArUco markers decode: finds four solid
+    black squares and returns them in detect_markers()'s exact shape —
+    {id: corners(4,2)} with ids 0/1/2/3 = top-left/top-right/bottom-right/
+    bottom-left and corners ordered TL,TR,BR,BL — so compute_homography()
+    runs unchanged. Empty dict when four plausible squares aren't there:
+    a random dark object fails the squareness, darkness, or quad-span
+    checks rather than hallucinating a board."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, dark = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Opening: drawn grid lines touch the corner squares and would merge
+    # them into one giant contour — eroding a few px cuts the thin lines,
+    # dilating restores the fat squares.
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=2)
+    contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    frame_area = gray.shape[0] * gray.shape[1]
+    frame_median = float(np.median(blurred))
+    candidates: list[tuple[float, np.ndarray]] = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if not BLOB_MIN_AREA_FRAC * frame_area <= area <= BLOB_MAX_AREA_FRAC * frame_area:
+            continue
+        approx = cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True)
+        if len(approx) != 4 or not cv2.isContourConvex(approx):
+            continue
+        _, (w, h), _ = cv2.minAreaRect(contour)
+        if min(w, h) == 0 or not 0.6 <= w / h <= 1.6:
+            continue
+        x, y, bw, bh = cv2.boundingRect(approx)
+        if area / (bw * bh) < BLOB_MIN_EXTENT:
+            continue
+        mask = np.zeros_like(gray)
+        cv2.drawContours(mask, [approx], -1, 255, -1)
+        if cv2.mean(blurred, mask=mask)[0] > BLOB_DARKER_THAN * frame_median:
+            continue
+        candidates.append((area, approx.reshape(4, 2).astype(np.float32)))
+
+    if len(candidates) < 4:
+        return {}
+    candidates.sort(key=lambda c: -c[0])
+    quads = [quad for _, quad in candidates[:4]]
+    centers = np.array([quad.mean(axis=0) for quad in quads])
+    hull_area = cv2.contourArea(cv2.convexHull(centers.astype(np.int32)))
+    if hull_area < MIN_CORNER_QUAD_FRAC * frame_area:
+        return {}
+
+    s = centers.sum(axis=1)
+    d = centers[:, 0] - centers[:, 1]
+    picked = {
+        0: quads[int(np.argmin(s))],  # top_left
+        1: quads[int(np.argmax(d))],  # top_right
+        2: quads[int(np.argmax(s))],  # bottom_right
+        3: quads[int(np.argmin(d))],  # bottom_left
+    }
+    return {mid: _order_quad(quad) for mid, quad in picked.items()}
 
 
 def cell_bounds(
@@ -203,6 +286,12 @@ class BoardTracker:
         now = time.monotonic() if now is None else now
         detected = detect_markers(frame, self._detector)
         homography, missing = compute_homography(detected, self.output_size)
+
+        if homography is None:
+            # D1's hand-drawn path: no markers decoded, so try four solid
+            # black corner squares instead. ArUco stays the primary,
+            # more precise path whenever both would decode.
+            homography, _ = compute_homography(detect_corner_squares(frame), self.output_size)
 
         if homography is not None:
             self._last_homography = homography
