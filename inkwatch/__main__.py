@@ -148,36 +148,44 @@ def _log_tick(
     already moved `phase` past `ESCALATE`, so this function would never
     actually see it. Quiet, unchanged frames while just waiting aren't
     logged; there can be thousands of those in a real game and they carry
-    no information the transitions around them don't already capture."""
+    no information the transitions around them don't already capture.
+
+    The move that ends the game changes the board AND enters GAME_OVER on
+    the same tick; it logs both a "commit" and a "result" line. Without
+    the commit line, metrics.py's commit-based accuracy never counts the
+    winning move (every game's last ply would score as missed)."""
     board_changed = prev is not None and result.board != prev.board
     phase_changed = prev is not None and result.phase != prev.phase
     first_tick = prev is None
-    if not (first_tick or board_changed or (phase_changed and result.phase in (Phase.ASK_HUMAN, Phase.GAME_OVER))):
+    entered_question = phase_changed and result.phase is Phase.ASK_HUMAN
+    entered_game_over = phase_changed and result.phase is Phase.GAME_OVER
+    if not (first_tick or board_changed or entered_question or entered_game_over):
         return
 
+    def _write(event_type: str) -> None:
+        frame_path = None
+        if rectified is not None:
+            frame_path = _save_frame(session_dir, rectified, event_type, frame_ts)
+        logger.log(
+            event_type,
+            frame_ts=frame_ts,
+            phase=result.phase,
+            turn=result.turn,
+            board=result.board,
+            message=result.message,
+            confidence=result.confidence,
+            target_cell=result.target_cell,
+            frame_path=frame_path,
+        )
+
     if first_tick:
-        event_type = "start"
-    else:
-        event_type = {
-            Phase.ASK_HUMAN: "question",
-            Phase.GAME_OVER: "result",
-        }.get(result.phase, "commit")
-
-    frame_path = None
-    if rectified is not None:
-        frame_path = _save_frame(session_dir, rectified, event_type, frame_ts)
-
-    logger.log(
-        event_type,
-        frame_ts=frame_ts,
-        phase=result.phase,
-        turn=result.turn,
-        board=result.board,
-        message=result.message,
-        confidence=result.confidence,
-        target_cell=result.target_cell,
-        frame_path=frame_path,
-    )
+        _write("start")
+    if board_changed:
+        _write("commit")
+    if entered_question:
+        _write("question")
+    if entered_game_over:
+        _write("result")
 
 
 def main(argv: list[str] | None = None) -> None:
