@@ -1,0 +1,29 @@
+# Ground-truth label for sessions/20260919T075832 — FILL BY WATCHING THE FRAMES.
+# The move cells and frame ranges below were pre-filled from events.jsonl as a
+# LOOKUP AID ONLY: verify every one against the raw frames (that's what makes
+# this ground truth independent of the log being scored), then fill
+# hand_left_frame_ts from the frame where the hand has just cleared the page.
+
+session_id: "20260919T075832"
+true_moves:
+  - cell: 0                      # verify; commit at frame_ts 481241.626 -> watch raw/000282.png .. raw/000294.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 4                      # verify; commit at frame_ts 481246.854 -> watch raw/000439.png .. raw/000451.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 6                      # verify; commit at frame_ts 481253.885 -> watch raw/000650.png .. raw/000662.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 3                      # verify; commit at frame_ts 481260.355 -> watch raw/000844.png .. raw/000856.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 5                      # verify; commit at frame_ts 481264.852 -> watch raw/000979.png .. raw/000991.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 2                      # verify; commit at frame_ts 481269.689 -> watch raw/001124.png .. raw/001136.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 8                      # verify; commit at frame_ts 481281.663 -> watch raw/001483.png .. raw/001495.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 7                      # verify; commit at frame_ts 481286.533 -> watch raw/001629.png .. raw/001641.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+  - cell: 1                      # verify; commit at frame_ts 481289.005 -> watch raw/001703.png .. raw/001715.png
+    hand_left_frame_ts: 0.0        # <-- FILL from the frames
+false_trigger_commits: 0            # <-- VERIFY: any commit with no real mark behind it?
+final_board: [X, X, O, O, O, X, X, O, X]  # from the result event
+notes: "9 moves, 0 questions, complete game (draw)"
