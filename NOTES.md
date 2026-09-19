@@ -40,7 +40,7 @@ Each entry: what I chose, what I considered, why, and what would make me change 
 ### D4. Stability gate before any evaluation
 - **Considered:** evaluating every frame and filtering noise afterwards.
 - **Why:** almost every false detection comes from a hand, pen or shadow in motion. Waiting for N quiet frames with all markers visible removes that whole class at a cost of ~0.6 s, which is inside the 1 s acknowledgement target. Two consistent stable reads before commit handles a pen lifted mid-stroke.
-- **Tuned value:** TODO (stability_frames, thresholds as actually used)
+- **Tuned value (measured, day 2 live sessions):** `stability_frames` 10 with dropout tolerance 2 (a hard reset per dropout made 10 consecutive quiet frames unreachable — measured quiet runs were 2-4 frames), `motion_threshold` 2.0 (measured steady-state rectified gray diff p90 = 1.38, so 2.0 was about right), board-lost hold-over 1.5 s (measured hand-drawn detection dropouts ran 1-2 s).
 
 ### D5. Low confidence → model → human, never a silent guess
 - **Why:** a wrong commit is worse than a question. The page and the state would diverge, and every later move would be built on it. The agent never changes committed state on its own; resolution comes from a consistent page, a model read that agrees with the ink data, or the human.
@@ -119,7 +119,7 @@ TODO: add entries as they happen, same format. Likely candidates: threshold cali
 - **Considered:** wiring in `classify_cell` against a snapshot-the-blank-board-as-baseline captured on a keypress, so the tool shows none/ambiguous/marked directly.
 - **Why not now:** that needs a per-cell baseline and a capture UX, which is session-state territory (`session.py`, M3) rather than a debug tool's job; the raw-ratio view is what the setup check actually needs (numbers near zero, one jumps on a mark) and needed no new concepts.
 - **Would change if:** manual testing on the real camera (`tools/calibrate.py`, 20 marks against `PRODUCT.md`'s M2 acceptance bar) shows raw ratios aren't legible enough to judge by eye; then add the baseline-snapshot + classify overlay.
-- **Tuned value:** TODO — `ink_threshold_low`/`ink_threshold_high`/`cell_inset` as actually confirmed against the real camera and pen (currently the `config.yaml` defaults, unverified beyond synthetic tests).
+- **Tuned value (measured, day 2 live sessions):** `ink_threshold_low` 0.025, `ink_threshold_high` 0.035, `cell_inset` 0.15, dilation 3×3×1 in `ink_ratio`. Data: bold marks measured +6.5% to +30% delta; thin pencil marks ~+1.5-2% raw, ~4-5% after dilation; steady-frame temporal drift ±1.6% max. Hand-drawn wobbly lines needed line-aware cell boundaries (real detected line positions) before these numbers were usable at all.
 - **Superseded by M2.3 below:** on review, M2's actual "done when" (`PRODUCT.md` §15: "correct per-cell none/ambiguous/marked on 20 manual marks") isn't checkable from raw ratios alone — it asks whether the *classification* is correct, not whether the number moves. Added the baseline snapshot after all.
 
 #### M2.3 `tools/calibrate.py` gets a baseline snapshot (`b` key) and shows none/ambiguous/marked
@@ -153,7 +153,7 @@ TODO: add entries as they happen, same format. Likely candidates: threshold cali
 - Anything that isn't a clean D2 high-confidence read (two marks at once, an ambiguous cell, ink in an occupied cell, ink outside the agent's armed cell) currently just **waits** for a cleaner read rather than escalating or asking — never guesses, per the hard rule, but doesn't yet recover with a spoken question either. `ESCALATE`/`ASK_HUMAN`/`BOARD_LOST`/`RESYNC` are defined in `Phase` (matching §8) but `Session.update()` never sets them yet.
 - G5's post-game full-board re-read (verifying the final page matches the reported state) isn't implemented — `_commit`'s terminal check only looks at the board `session.py` already believes, not a fresh read of all nine cells.
 - `--record` and `--no-escalation` are accepted by `__main__.py` for forward compatibility with the README's documented flags, but `--record` currently just prints that it isn't built yet (M5); `--no-escalation` is a no-op since there's no escalation path to disable yet.
-- **Tuned value:** TODO — `motion_threshold` and the debounce/reminder timings, as actually confirmed against a real camera and a real hand drawing (currently config defaults, unverified beyond synthetic `Observation`s and synthetic frames).
+- **Tuned value (measured, day 2 live sessions):** `stability_frames` 10 with dropout tolerance 2 (hard reset made 10 consecutive quiet frames unreachable — measured quiet runs were 2-4), `motion_threshold` 2.0 (measured steady-state gray diff p90 = 1.38), board-lost hold-over 1.5 s (measured dropouts ran 1-2 s). Reminder timings unchanged, unmeasured.
 
 #### M4.1 `ESCALATE` has no model yet, so it's a deliberate one-frame stub, not a stand-in for M5
 - **Chosen:** the two situations §9 says should "Escalate" first (two new marks, a persistently ambiguous cell) enter `Phase.ESCALATE` for exactly one `update()` beat (silent, `confidence="escalating"` so the overlay shows it), then fall straight through to `ASK_HUMAN` on the next call. There's nowhere for a real model call to await a result yet.

@@ -103,7 +103,7 @@ Short, calm, one instruction per utterance. The agent never lectures. When somet
 ### 7.2 Move detection and confidence
 | ID | Requirement |
 |---|---|
-| D1 | On each stable frame, classify each empty cell's ink delta as `none` (< T_low), `ambiguous` (T_low to T_high), or `marked` (≥ T_high). Defaults: T_low 2%, T_high 5% of inner-cell pixels; calibrated at session start. |
+| D1 | On each stable frame, classify each empty cell's ink delta as `none` (< T_low), `ambiguous` (T_low to T_high), or `marked` (≥ T_high). Defaults: T_low 2.5%, T_high 3.5% of inner-cell pixels (of a once-dilated ink mask — see `NOTES.md`); tuned on live recordings. |
 | D2 | **High confidence** = exactly one empty cell `marked`, zero `ambiguous`, no occupied cell changed, cell is legal for the current turn. Accept immediately. |
 | D3 | **Low confidence** = anything else (zero marks after a long occlusion, two marks, an ambiguous cell, symbol mismatch, change in an occupied cell). |
 | D4 | Low confidence triggers **escalation**: send the rectified board and the current known state to a vision model and ask which single cell, if any, has a new mark. Timeout 3 s. |

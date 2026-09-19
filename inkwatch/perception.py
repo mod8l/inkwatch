@@ -48,8 +48,8 @@ DEFAULT_HOLD_SECONDS = 1.5  # P2 hold-over; ~1s detection dropouts are normal on
 # a BOARD_LOST -> RESYNC -> spurious-mismatch loop
 
 DEFAULT_CELL_INSET = 0.15
-DEFAULT_INK_LOW = 0.02
-DEFAULT_INK_HIGH = 0.05
+DEFAULT_INK_LOW = 0.025  # measured: temporal drift on steady frames stays under ~1.6% (post-dilation)
+DEFAULT_INK_HIGH = 0.035  # measured: thin pencil marks dilate to ~4-5%, bold marks to 8%+ (NOTES.md)
 
 DEFAULT_STABILITY_FRAMES = 10
 DEFAULT_MOTION_THRESHOLD = 2.0  # mean abs pixel diff (0-255) between consecutive rectified frames
@@ -459,6 +459,12 @@ def ink_ratio(cell_image: np.ndarray) -> float:
 
     Adaptive thresholding rather than a single global cutoff, so uneven
     lighting across the page doesn't bias one cell against another (P4).
+    The dark mask is then dilated once (3x3): a thin pencil stroke can be
+    1-2 px wide at VGA — ~1% of a cell, below any threshold that also
+    rejects realignment drift. Dilating makes thin marks ~2-3x more
+    visible (measured on the live recordings) without changing the delta
+    contract: static structure dilates identically in the baseline and
+    cancels in the subtraction.
     """
     gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY) if cell_image.ndim == 3 else cell_image
     h, w = gray.shape[:2]
@@ -471,6 +477,7 @@ def ink_ratio(cell_image: np.ndarray) -> float:
         block_size,
         5,
     )
+    dark = cv2.dilate(dark, np.ones((3, 3), np.uint8), iterations=1)
     return float(np.count_nonzero(dark)) / dark.size
 
 

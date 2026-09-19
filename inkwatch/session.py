@@ -60,8 +60,8 @@ from inkwatch.rules import EMPTY_BOARD, Board, Symbol, apply_move, is_draw, winn
 
 DEFAULT_REMINDER_S: tuple[float, float] = (10.0, 20.0)
 DEFAULT_OCCLUSION_REMINDER_S = 15.0  # §9: "Hand stays over the page... after 15 s"
-DEFAULT_INK_LOW = 0.02   # duplicates perception.py's default; kept a literal here so
-DEFAULT_INK_HIGH = 0.05  # this module doesn't need a module-level import of perception.py
+DEFAULT_INK_LOW = 0.025   # duplicates perception.py's default; kept a literal here so
+DEFAULT_INK_HIGH = 0.035  # this module doesn't need a module-level import of perception.py
 
 # How many consecutive stable reads of the same lone ambiguous cell before
 # it counts as "persistent" (shadow/glare/faint pen, §9) rather than a
