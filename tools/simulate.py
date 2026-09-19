@@ -102,9 +102,15 @@ class CameraServer(socketserver.ThreadingTCPServer):
         super().__init__(("127.0.0.1", port), _StreamHandler)
 
     def claim_clock(self) -> int:
-        """Connections are numbered; client 0 owns the scene clock."""
+        """Connections are numbered; the LATEST one owns the scene clock.
+        Ownership must migrate on reconnect: the restarted app (or a
+        re-plugged camera) is a new connection — if the first client kept
+        ownership forever, every later client would get a frozen scene
+        (found when B2's restarted app calibrated on a static frame and
+        then nothing ever moved again)."""
         cid = self._next_client_id
         self._next_client_id += 1
+        self._clock_owner = cid
         return cid
 
     def is_clock_owner(self, cid: int) -> bool:
@@ -429,10 +435,7 @@ class Director:
 
     def instant_mark(self, cell: int, symbol: str) -> None:
         def _stamp():
-            from simrender import make_x, make_o
-            box = self.scene.cell_boxes[cell]
-            mark = make_x(box, self.scene.rng, self.scene.h_inv) if symbol == "X" else make_o(box, self.scene.rng, self.scene.h_inv)
-            self.scene.marks[cell] = mark
+            self.scene.marks[cell] = self.scene._place_mark(cell, symbol)
         self.server.scene_call(_stamp)
         self.timeline.add("action", f"sneaky mark {symbol} at {CELL_NAMES[cell]} (unseen)")
 
@@ -559,13 +562,16 @@ class Director:
 
 
 def _find_monitor_source() -> str | None:
-    """A PipeWire source that monitors the speakers (for the TTS track)."""
+    """The default output sink's id — `pw-record --target <sink>` captures
+    exactly what plays through the speakers (verified: the app's TTS at
+    -22 dB mean). There is no separate 'monitor' node on this PipeWire
+    setup; targeting the sink itself is the way."""
     try:
         out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5).stdout
         data = json.loads(out)
         for obj in data:
             props = obj.get("info", {}).get("props", {})
-            if props.get("media.class") == "Audio/Source" and "monitor" in str(props.get("node.name", "")):
+            if props.get("media.class") == "Audio/Sink":
                 return str(obj["id"])
     except Exception:
         pass

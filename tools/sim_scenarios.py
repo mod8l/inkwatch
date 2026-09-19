@@ -35,9 +35,17 @@ OUT_ROOT = Path("recordings/sim")
 # ------------------------------------------------------------------ helpers
 
 
+
+def first_empty(d: Director, priority=(2, 6, 8, 1, 3, 5, 7, 0, 4)) -> int:
+    """First empty cell on the app's own board, in priority order —
+    resume moves must never land on the agent's ink."""
+    board = app_board(d)
+    return next(c for c in priority if board[c] is None)
+
 def play_human_move(d: Director, cell: int, ply: str, symbol: str = "X") -> int | None:
     """Draw the human's mark; expect 'You played <cell>. I'll take <target>.'
     Returns the agent's armed target cell (or None on failure)."""
+    d._pump(0.9)  # a human takes a beat to hear the instruction and aim
     d.draw(cell, symbol)
     got = d.wait_msg("You played", timeout=30)
     if got:
@@ -52,6 +60,7 @@ def play_human_move(d: Director, cell: int, ply: str, symbol: str = "X") -> int 
 def play_agent_ink(d: Director, target: int, ply: str, symbol: str = "O") -> bool:
     """Draw the agent's mark in its armed cell; expect 'Got it.' (or a
     terminal line, which is also a fine answer)."""
+    d._pump(0.9)
     d.draw(target, symbol)
     got = d.wait_msg(["Got it.", "I win", "It's a draw", "You win"], timeout=30)
     if got:
@@ -105,6 +114,7 @@ def run_happy(d: Director) -> None:
         cell = next((c for c in human_plan if board[c] is None), None)
         if cell is None:
             break
+        d._pump(0.9)
         d.draw(cell, "X")
         pat, line = d.wait_msg(["You played", "I win", "It's a draw", "You win"], timeout=35) or (None, None)
         if pat is None:
@@ -119,6 +129,7 @@ def run_happy(d: Director) -> None:
         if target is None:
             d.check(f"ply {ply}: agent reply armed", False, line)
             break
+        d._pump(0.9)
         d.draw(target, "O")
         pat, line = d.wait_msg(["Got it.", "I win", "It's a draw", "You win"], timeout=35) or (None, None)
         if pat is None:
@@ -168,7 +179,7 @@ def run_recovery(d: Director) -> None:
     if got:
         d.say_seen(got[1])
     d.check("occupied-cell scribble is warned", got is not None, "no 'already taken' warning")
-    target = play_human_move(d, 2, "B2 recovery")
+    target = play_human_move(d, first_empty(d), "B2 recovery")
     d.check("game continues with ink left in the taken cell", target is not None,
             "DEADLOCK: further moves never evaluate while the extra ink stays")
 
@@ -220,7 +231,7 @@ def run_recovery(d: Director) -> None:
         d.say_seen(got[1])
     d.check("lingering hand gets the patient reminder", got is not None, "no reminder after ~15 s occluded")
     d._wait_idle()
-    target2 = play_human_move(d, 0, "B5 resume")
+    target2 = play_human_move(d, first_empty(d), "B5 resume")
     d.check("game resumes when the hand leaves", target2 is not None, "never evaluated a move after the linger")
 
     d.set_scenario("B6 page bump (human turn)", "Page shoved mid-game — BOARD_LOST, RESYNC, same game back")
@@ -234,7 +245,7 @@ def run_recovery(d: Director) -> None:
     if got:
         d.say_seen(got[1])
     d.check("bumped page resyncs back into the game", got is not None, "no resync greeting after bump")
-    target2 = play_human_move(d, 0, "B6 resume")
+    target2 = play_human_move(d, first_empty(d), "B6 resume")
     d.check("moves evaluate again after the bump", target2 is not None, "no move committed after resync")
 
     d.set_scenario("B7 page bump (agent turn)", "Bumped while the agent's mark is armed — same cell re-armed")
@@ -288,7 +299,7 @@ def run_recovery(d: Director) -> None:
             "no light-or-page question for the shadowed cell")
     d.clear_shadow()
     d._pump(1.0)
-    target2 = play_human_move(d, 0, "B9 resume")
+    target2 = play_human_move(d, first_empty(d), "B9 resume")
     d.check("game resumes once the shadow lifts", target2 is not None, "no move committed after shadow cleared")
 
     d.set_scenario("B10 erased mark", "A committed mark is erased — the agent notices it vanished")
@@ -304,7 +315,7 @@ def run_recovery(d: Director) -> None:
     d.check("erased committed mark is reported", got is not None, "no disappeared-mark warning")
     d.draw(4, "X")
     d._pump(2.0)
-    target2 = play_human_move(d, 0, "B10 resume")
+    target2 = play_human_move(d, first_empty(d), "B10 resume")
     d.check("redrawing the mark lets the game continue", target2 is not None,
             "game did not continue after the mark was redrawn")
 

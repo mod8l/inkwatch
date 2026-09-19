@@ -353,12 +353,30 @@ class Scene:
     def busy(self) -> bool:
         return self._action is not None
 
+    def _pose_inverse(self) -> np.ndarray:
+        """Inverse of the current page-bump affine. New ink is placed
+        through it: marks are rendered into the world BEFORE the pose
+        warp (so existing ink moves with the page), and a mark meant for
+        a cell must land on that cell's CURRENT position after the warp."""
+        M = cv2.getRotationMatrix2D((FRAME_W / 2, FRAME_H / 2), self.pose["deg"], 1.0)
+        M[0, 2] += self.pose["dx"]
+        M[1, 2] += self.pose["dy"]
+        return cv2.invertAffineTransform(M)
+
+    def _place_mark(self, cell: int, symbol: str) -> Mark:
+        box = self.cell_boxes[cell]
+        mark = make_x(box, self.rng, self.h_inv) if symbol == "X" else make_o(box, self.rng, self.h_inv)
+        if any(abs(self.pose[k]) > 1e-3 for k in ("dx", "dy", "deg")):
+            inv = self._pose_inverse()
+            for path in mark.paths:
+                pts = np.hstack([path.astype(np.float32), np.ones((len(path), 1), np.float32)])
+                path[:] = np.round((inv @ pts.T).T).astype(np.int32)
+        return mark
+
     def draw(self, cell: int, symbol: str, draw_s: float | None = None) -> None:
         """Pencil enters from the left edge, draws the mark progressively,
         dwells a beat, exits. Symbol 'X' or 'O'."""
-        rng = self.rng
-        box = self.cell_boxes[cell]
-        mark = make_x(box, rng, self.h_inv) if symbol == "X" else make_o(box, rng, self.h_inv)
+        mark = self._place_mark(cell, symbol)
         if draw_s is None:
             draw_s = max(0.5, mark.total / 260.0)  # ~260 px/s hand speed
         self._action = _Action("draw", PENCIL_ENTER_S + draw_s + PENCIL_DWELL_S + PENCIL_EXIT_S, {
@@ -385,9 +403,7 @@ class Scene:
     def half_draw_then_finish(self, cell: int, symbol: str, pause_s: float = 1.4) -> None:
         """§9 'half-drawn mark, pen lifted briefly': draws ~55%, pencil
         fully leaves for `pause_s`, returns and finishes the same mark."""
-        rng = self.rng
-        box = self.cell_boxes[cell]
-        mark = make_x(box, rng, self.h_inv) if symbol == "X" else make_o(box, rng, self.h_inv)
+        mark = self._place_mark(cell, symbol)
         self._action = _Action("half", PENCIL_ENTER_S + 0.6 + pause_s + PENCIL_ENTER_S + 0.7 + PENCIL_DWELL_S + PENCIL_EXIT_S, {
             "cell": cell, "mark": mark, "pause_s": pause_s,
         })
