@@ -172,7 +172,7 @@ class AppProcess:
         )
         self.lines: queue.Queue[tuple[float, str]] = queue.Queue()
         self.session_dirs: list[Path] = []
-        self._log = log_path.open("w")
+        self._log = log_path.open("a")
         self._dead = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
@@ -262,6 +262,7 @@ class Director:
         self._server_thread.start()
         self.screen = None
         self.audio = None
+        self.recorder_info: dict = {}
         if self.record_screen:
             self.screen = subprocess.Popen(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -271,20 +272,24 @@ class Director:
                  str(self.out_dir / "screen.mkv")],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
+            self.recorder_info["screen_start_wall"] = time.time()
             audio_target = _find_monitor_source()
             if audio_target is not None:
                 self.audio = subprocess.Popen(
                     ["pw-record", "--target", audio_target, str(self.out_dir / "audio.wav")],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
+                self.recorder_info["audio_start_wall"] = time.time()
             time.sleep(1.0)  # let recorders settle before t0
         self.timeline.t0 = time.time()
+        self.recorder_info["t0_wall"] = self.timeline.t0
         self.app = AppProcess(self.port, self.app_args, self.out_dir / "app.log", voice=self.voice)
         self._record_window_geometry()
         return self
 
     def __exit__(self, *exc) -> None:
         self.timeline.flush()
+        (self.out_dir / "recorders.json").write_text(json.dumps(self.recorder_info))
         self.app.stop()
         self.server.shutdown()
         self.feed.close()
@@ -478,10 +483,13 @@ class Director:
         self.timeline.add("action", f"camera unplugged {seconds}s then restored")
 
     def _wait_idle(self) -> None:
+        deadline = time.time() + 45.0
         while True:
             busy = self.server.scene_call(lambda: self.scene.busy)
             if not busy:
                 return
+            if time.time() > deadline:
+                raise RuntimeError("scene action never finished (stream stalled?)")
             self._pump(0.05)
 
     # -- compound helpers ------------------------------------------------------

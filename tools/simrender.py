@@ -65,7 +65,8 @@ FRAME_W, FRAME_H = 640, 480
 NOISE_SIGMA = 0.15
 
 GRAPHITE_GRAY = (141, 143, 145)  # BGR, sampled from real X strokes
-STROKE_WIDTH = 1  # 1 px at VGA dilates to ~6% of a cell — Gad's thin pencil
+STROKE_WIDTH = 1  # 1 px at VGA: a full X dilates to ~4.5-6.5% of a cell —
+# Gad's thin pencil measured at ~4-5% (NOTES.md); a 55% X reads ambiguous
 
 PENCIL_DWELL_S = 0.15
 PENCIL_ENTER_S = 0.35
@@ -212,7 +213,7 @@ def make_x(box: tuple[int, int, int, int], rng, h_inv: np.ndarray) -> Mark:
     to raw-frame coords through the inverse homography."""
     x0, y0, x1, y1 = box
     w, h = x1 - x0, y1 - y0
-    mx, my = w * 0.20, h * 0.20
+    mx, my = w * 0.30, h * 0.30
     diag1 = _wobble_line((x0 + mx, y0 + my), (x1 - mx, y1 - my), rng)
     diag2 = _wobble_line((x1 - mx, y0 + my * 1.3), (x0 + mx * 1.2, y1 - my), rng)
     return Mark([_to_raw(diag1, h_inv), _to_raw(diag2, h_inv)])
@@ -221,7 +222,7 @@ def make_x(box: tuple[int, int, int, int], rng, h_inv: np.ndarray) -> Mark:
 def make_o(box: tuple[int, int, int, int], rng, h_inv: np.ndarray) -> Mark:
     x0, y0, x1, y1 = box
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    rx, ry = (x1 - x0) * 0.30, (y1 - y0) * 0.30
+    rx, ry = (x1 - x0) * 0.22, (y1 - y0) * 0.22
     turns = 1.12  # hand Os overshoot the close
     n = 60
     phase = rng.uniform(0, math.pi)
