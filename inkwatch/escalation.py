@@ -34,7 +34,7 @@ from inkwatch.output import cell_name
 from inkwatch.rules import Board
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "google/gemini-flash"
+DEFAULT_MODEL = "google/gemini-3.5-flash"
 DEFAULT_TIMEOUT_S = 3.0
 DEFAULT_MAX_CALLS_PER_GAME = 5
 
