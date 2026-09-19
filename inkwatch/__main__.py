@@ -33,10 +33,13 @@ from inkwatch.events import Observation, SessionLogger
 from inkwatch.output import Speaker, draw_overlay
 from inkwatch.perception import (
     DEFAULT_CELL_INSET,
+    DEFAULT_HOLD_SECONDS,
     DEFAULT_INK_HIGH,
     DEFAULT_INK_LOW,
     DEFAULT_MOTION_THRESHOLD,
+    DEFAULT_OUTPUT_SIZE,
     DEFAULT_STABILITY_FRAMES,
+    BoardTracker,
     Perceiver,
     StabilityGate,
 )
@@ -94,6 +97,19 @@ def _make_escalator(config: dict, disabled_by_flag: bool) -> Escalator:
     )
 
 
+def _new_session_dir(log_dir: Path) -> Path:
+    """One directory per game, so each game's events.jsonl is scored on
+    its own by metrics.py. Two games started within the same second would
+    otherwise share a timestamp-named directory and interleave one log."""
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    session_dir = log_dir / stamp
+    n = 2
+    while session_dir.exists():
+        session_dir = log_dir / f"{stamp}-{n}"
+        n += 1
+    return session_dir
+
+
 class _Recorder:
     """L3: `--record`'s raw-frame writer — every frame perception sees,
     with a manifest `replay.py` can read back in order. A no-op when
@@ -148,36 +164,46 @@ def _log_tick(
     already moved `phase` past `ESCALATE`, so this function would never
     actually see it. Quiet, unchanged frames while just waiting aren't
     logged; there can be thousands of those in a real game and they carry
-    no information the transitions around them don't already capture."""
+    no information the transitions around them don't already capture.
+
+    The move that ends the game changes the board AND enters GAME_OVER on
+    the same tick; it logs both a "commit" and a "result" line. Without
+    the commit line, metrics.py's commit-based accuracy never counts the
+    winning move (every game's last ply would score as missed)."""
     board_changed = prev is not None and result.board != prev.board
     phase_changed = prev is not None and result.phase != prev.phase
     first_tick = prev is None
-    if not (first_tick or board_changed or (phase_changed and result.phase in (Phase.ASK_HUMAN, Phase.GAME_OVER))):
+    entered_question = phase_changed and result.phase is Phase.ASK_HUMAN
+    entered_game_over = phase_changed and result.phase is Phase.GAME_OVER
+    if not (first_tick or board_changed or entered_question or entered_game_over):
         return
 
+    def _write(event_type: str) -> None:
+        frame_path = None
+        if rectified is not None:
+            frame_path = _save_frame(session_dir, rectified, event_type, frame_ts)
+        logger.log(
+            event_type,
+            frame_ts=frame_ts,
+            phase=result.phase,
+            turn=result.turn,
+            board=result.board,
+            message=result.message,
+            confidence=result.confidence,
+            target_cell=result.target_cell,
+            frame_path=frame_path,
+        )
+
     if first_tick:
-        event_type = "start"
-    else:
-        event_type = {
-            Phase.ASK_HUMAN: "question",
-            Phase.GAME_OVER: "result",
-        }.get(result.phase, "commit")
-
-    frame_path = None
-    if rectified is not None:
-        frame_path = _save_frame(session_dir, rectified, event_type, frame_ts)
-
-    logger.log(
-        event_type,
-        frame_ts=frame_ts,
-        phase=result.phase,
-        turn=result.turn,
-        board=result.board,
-        message=result.message,
-        confidence=result.confidence,
-        target_cell=result.target_cell,
-        frame_path=frame_path,
-    )
+        _write("start")
+    if board_changed:
+        _write("commit")
+    if entered_question and result.message:
+        # A re-entry into ASK_HUMAN that re-asked nothing (session.py's
+        # speak-once) must not log a duplicate "question" either.
+        _write("question")
+    if entered_game_over:
+        _write("result")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -196,7 +222,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Could not open camera '{camera}'", file=sys.stderr)
         sys.exit(1)
 
+    board_cfg = config.get("board") or {}
     perceiver = Perceiver(
+        board=BoardTracker(
+            output_size=int(board_cfg.get("rectified_size", DEFAULT_OUTPUT_SIZE)),
+            hold_seconds=float(board_cfg.get("board_lost_hold_s", DEFAULT_HOLD_SECONDS)),
+        ),
         stability=StabilityGate(
             stability_frames=config.get("stability_frames", DEFAULT_STABILITY_FRAMES),
             motion_threshold=config.get("motion_threshold", DEFAULT_MOTION_THRESHOLD),
@@ -209,10 +240,29 @@ def main(argv: list[str] | None = None) -> None:
     escalator = _make_escalator(config, disabled_by_flag=args.no_escalation)
     speaker = Speaker(enabled=voice)
 
-    session_id = datetime.now().strftime("%Y%m%dT%H%M%S")
-    session_dir = Path(config.get("log_dir", "sessions/")) / session_id
+    log_dir = Path(config.get("log_dir", "sessions/"))
+    session_dir = _new_session_dir(log_dir)
+    print(f"Logging this game to {session_dir}")
     logger = SessionLogger(session_dir, "events", enabled=True)
     recorder = _Recorder(session_dir if args.record else None)
+
+    def _start_new_game() -> None:
+        """Fresh game state: a new Session AND a fresh per-game escalation
+        budget, event log, and recording — reusing any of them silently
+        merges two games into one metrics view (and leaves every later
+        game with no model calls once the first game spent the budget).
+        Called by the `n` key and by GAME_OVER's new-board auto-restart."""
+        nonlocal session, escalator, session_dir, logger, recorder, prev_result
+        logger.close()
+        recorder.close()
+        escalator.close()
+        session = _new_session(config, agent_first, ink_low, ink_high)
+        escalator = _make_escalator(config, disabled_by_flag=args.no_escalation)
+        session_dir = _new_session_dir(log_dir)
+        print(f"Logging this game to {session_dir}")
+        logger = SessionLogger(session_dir, "events", enabled=True)
+        recorder = _Recorder(session_dir if args.record else None)
+        prev_result = None
 
     debug = False
     camera_lost_since: float | None = None
@@ -255,6 +305,12 @@ def main(argv: list[str] | None = None) -> None:
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
                     break
                 time.sleep(CAMERA_RETRY_S)
+                # A dead capture doesn't hot-plug on read(): re-reading the
+                # same VideoCapture after a real unplug fails forever.
+                # Release and re-open, or §9's "retry every 2 s" never
+                # actually recovers.
+                cap.release()
+                cap = cv2.VideoCapture(camera)
                 continue
 
             camera_lost_since = None
@@ -284,6 +340,9 @@ def main(argv: list[str] | None = None) -> None:
                     confidence=result.confidence,
                     cell_marks=result.cell_marks,
                     debug=debug,
+                    grid_lines=perceiver.last_grid_lines,
+                    highlight_cells=result.highlight_cells,
+                    target_symbol=(result.turn if result.phase is Phase.WAIT_AGENT_INK else None),
                 )
                 cv2.imshow("inkwatch", rectified)
             else:
@@ -297,6 +356,12 @@ def main(argv: list[str] | None = None) -> None:
 
             prev_result = result
 
+            # A fresh blank page after GAME_OVER starts a new game on its
+            # own — same as the `n` key, minus the keypress.
+            if result.phase == Phase.GAME_OVER and session.new_board_detected(observation):
+                print("New page detected — starting a new game.")
+                _start_new_game()
+
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
@@ -305,8 +370,7 @@ def main(argv: list[str] | None = None) -> None:
             if key == ord("r"):
                 session.force_resync()
             if key == ord("n"):
-                session = _new_session(config, agent_first, ink_low, ink_high)
-                prev_result = None
+                _start_new_game()
     finally:
         speaker.close()
         escalator.close()

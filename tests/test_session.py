@@ -499,6 +499,48 @@ def test_ink_in_an_occupied_cell_warns_and_keeps_the_old_state():
     assert third.message is None
 
 
+def test_occupied_cell_ink_does_not_block_later_moves():
+    """The occupied-cell scribble is permanent on paper — after the
+    warning the game must go on evaluating, not soft-lock (found by the
+    scenario simulator: the drift early-return swallowed every later
+    move)."""
+    session = _calibrated_session()
+    session.board = ("X",) + session.board[1:]
+    session.baseline = [0.0] * 9
+    changed = marks(c0="marked")
+
+    session.update(obs(cell_marks=changed, frame_ts=1.0), now=1.0)
+    warned = session.update(obs(cell_marks=changed, frame_ts=2.0), now=2.0)
+    assert "already taken" in warned.message.lower()
+
+    # the scribble stays; a new move in an empty cell still commits (D6)
+    both = marks(c0="marked", c4="marked")
+    first = session.update(obs(cell_marks=both, frame_ts=3.0), now=3.0)
+    assert first.message is None  # debounce read, not a new warning
+    second = session.update(obs(cell_marks=both, frame_ts=4.0), now=4.0)
+    assert second.message is not None
+    assert "You played center" in second.message
+    assert session.board[4] == "X"
+
+
+def test_a_new_scribble_after_acknowledgement_warns_again():
+    session = _calibrated_session()
+    session.board = ("X", None, None, None, "X", None, None, None, None)
+    session.baseline = [0.0] * 9
+    changed = marks(c0="marked")
+
+    session.update(obs(cell_marks=changed, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=changed, frame_ts=2.0), now=2.0)
+    session.update(obs(cell_marks=changed, frame_ts=3.0), now=3.0)  # acknowledged, silent
+
+    both = marks(c0="marked", c4="marked")  # a second taken cell gets scribbled
+    first = session.update(obs(cell_marks=both, frame_ts=4.0), now=4.0)
+    assert first.message is None
+    warned = session.update(obs(cell_marks=both, frame_ts=5.0), now=5.0)
+    assert warned.message is not None
+    assert "already taken" in warned.message.lower()
+
+
 def test_an_erased_mark_warns_that_it_disappeared():
     session = _calibrated_session()
     session.board = ("X",) + session.board[1:]
@@ -509,11 +551,32 @@ def test_an_erased_mark_warns_that_it_disappeared():
     first = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=1.0), now=1.0)
     assert first.message is None
 
-    second = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=2.0), now=2.0)
+    second = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=2.5), now=2.5)
     assert second.message is not None
     assert "disappeared" in second.message.lower()
     assert "top left" in second.message.lower()
     assert session.board[0] == "X"  # never guesses a removal into a committed change
+
+
+def test_a_briefly_low_read_is_not_yet_an_erasure():
+    """The erased warning is blocking, so it must outlive homography
+    re-settling after the drawing hand leaves: the same low set has to
+    persist before anything is said (found by the scenario simulator —
+    a clean commit reported 'disappeared' one beat later and the game
+    soft-locked)."""
+    session = _calibrated_session()
+    session.board = ("X",) + session.board[1:]
+    session.baseline = [0.05] + [0.0] * 8  # a thin pencil mark: low reads near the edge
+    faded_ratios = (0.02,) + (0.0,) * 8  # a low-but-not-gone read (settling artifact)
+
+    first = session.update(obs(ratios=faded_ratios, cell_marks=marks(), frame_ts=1.0), now=1.0)
+    assert first.message is None
+    second = session.update(obs(ratios=faded_ratios, cell_marks=marks(), frame_ts=1.5), now=1.5)
+    assert second.message is None  # still inside the persistence window
+    # the artifact settles; the mark reads fine again -> nothing happened
+    recovered = (0.05,) + (0.0,) * 8
+    third = session.update(obs(ratios=recovered, cell_marks=marks(), frame_ts=2.0), now=2.0)
+    assert third.message is None
 
 
 # -- M4: ink in the wrong armed cell (§9) --------------------------------
@@ -629,3 +692,264 @@ def test_hand_lingering_during_wait_human_reminds_after_the_occlusion_timeout():
 
     assert reminder.message is not None
     assert "take your time" in reminder.message.lower()
+
+
+# -- Post-M7: contested reads escalate/ask instead of stalling silently ----
+#
+# A clear mark plus a shadow (marked + ambiguous), two ambiguous cells, or
+# the agent's ink arriving with extra marks used to match no branch in
+# _handle_human_turn/_handle_agent_ink: no commit, no escalation, no
+# message, forever — the game just stopped. Every contested shape now
+# routes into the same escalate-then-ask machinery a clean read gets.
+
+
+def test_one_marked_plus_one_ambiguous_escalates_instead_of_stalling():
+    session = _calibrated_session()
+    mixed = marks(c0="marked", c1="ambiguous")  # a real mark with a shadow beside it
+
+    session.update(obs(cell_marks=mixed, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=mixed, frame_ts=2.0), now=2.0)
+
+    assert session.phase == Phase.ESCALATE
+    assert session.board == (None,) * 9
+
+
+def test_two_ambiguous_cells_escalate_instead_of_stalling():
+    session = _calibrated_session()
+    two_ambiguous = marks(c2="ambiguous", c5="ambiguous")
+
+    session.update(obs(cell_marks=two_ambiguous, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=two_ambiguous, frame_ts=2.0), now=2.0)
+
+    assert session.phase == Phase.ESCALATE
+
+
+def test_mixed_marks_ask_then_commit_once_the_page_is_clear():
+    session = _calibrated_session()
+    mixed = marks(c0="marked", c1="ambiguous")
+
+    session.update(obs(cell_marks=mixed, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=mixed, frame_ts=2.0), now=2.0)
+    assert session.phase == Phase.ESCALATE
+
+    # No escalator wired in: the safety net resolves to ASK_HUMAN.
+    asked = session.update(obs(cell_marks=mixed, frame_ts=3.0), now=3.0)
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "which one is your move" in asked.message.lower()
+
+    # The shadow clears; the real mark commits through the normal debounce.
+    clean = marks(c0="marked")
+    session.update(obs(cell_marks=clean, frame_ts=4.0), now=4.0)
+    session.update(obs(cell_marks=clean, frame_ts=5.0), now=5.0)
+
+    assert session.board[0] == "X"
+    assert session.phase == Phase.WAIT_AGENT_INK
+
+
+def test_more_than_two_candidates_names_the_cells_in_the_question():
+    session = _calibrated_session()
+    three = marks(c0="marked", c1="marked", c2="ambiguous")
+
+    session.update(obs(cell_marks=three, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=three, frame_ts=2.0), now=2.0)
+    asked = session.update(obs(cell_marks=three, frame_ts=3.0), now=3.0)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "top left" in asked.message.lower()
+    assert "which one is your move" in asked.message.lower()
+
+
+def test_agent_ink_in_the_target_plus_a_stray_mark_asks():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    stray = next(i for i in range(9) if i != target and session.board[i] is None)
+    both = marks(**{f"c{target}": "marked", f"c{stray}": "marked"})
+
+    session.update(obs(cell_marks=both, frame_ts=10.0), now=10.0)
+    asked = session.update(obs(cell_marks=both, frame_ts=11.0), now=11.0)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert cell_name(target) in asked.message.lower()
+    assert cell_name(stray) in asked.message.lower()
+    assert session.board[target] is None  # not committed while the page has extra ink
+
+
+def test_two_stray_marks_during_agent_ink_ask_with_plural_wording():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    empties = [i for i in range(9) if i != target and session.board[i] is None][:2]
+    strays = marks(**{f"c{empties[0]}": "marked", f"c{empties[1]}": "marked"})
+
+    session.update(obs(cell_marks=strays, frame_ts=10.0), now=10.0)
+    asked = session.update(obs(cell_marks=strays, frame_ts=11.0), now=11.0)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "marks in" in asked.message.lower()
+    for cell in empties:
+        assert cell_name(cell) in asked.message.lower()
+
+
+def test_target_ink_with_persistent_noise_asks_then_commits_when_clean():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    noisy = next(i for i in range(9) if i != target and session.board[i] is None)
+    read = marks(**{f"c{target}": "marked", f"c{noisy}": "ambiguous"})
+
+    for frame in (10.0, 11.0, 12.0):  # AMBIGUOUS_ESCALATE_READS consistent reads
+        asked = session.update(obs(cell_marks=read, frame_ts=frame), now=frame)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert cell_name(target) in asked.message.lower()
+    assert session.board[target] is None
+
+    clean = marks(**{f"c{target}": "marked"})
+    session.update(obs(cell_marks=clean, frame_ts=13.0), now=13.0)
+    session.update(obs(cell_marks=clean, frame_ts=14.0), now=14.0)
+
+    assert session.board[target] == "O"
+    assert session.phase == Phase.WAIT_HUMAN
+
+
+def test_ambiguous_only_noise_during_agent_ink_asks_after_a_streak():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    noisy = next(i for i in range(9) if i != target and session.board[i] is None)
+    read = marks(**{f"c{noisy}": "ambiguous"})
+
+    for frame in (10.0, 11.0, 12.0):
+        asked = session.update(obs(cell_marks=read, frame_ts=frame), now=frame)
+
+    assert asked.phase == Phase.ASK_HUMAN
+    assert "can't tell" in asked.message.lower()
+    assert session.target_cell == target  # still armed; not silently dropped
+
+
+# -- Overlay highlight hints (§6.3: spoken cells pair with a highlight) -----
+
+
+def test_wait_agent_ink_highlights_the_armed_target_cell():
+    session = _calibrated_session()
+    result = _commit_human_move(session, cell=0)
+
+    assert result.phase == Phase.WAIT_AGENT_INK
+    assert result.highlight_cells == frozenset({session.target_cell})
+
+
+def test_escalation_highlights_every_candidate_cell():
+    session = _calibrated_session()
+    two_marks = marks(c0="marked", c1="marked")
+
+    session.update(obs(cell_marks=two_marks, frame_ts=1.0), now=1.0)
+    result = session.update(obs(cell_marks=two_marks, frame_ts=2.0), now=2.0)
+
+    assert result.phase == Phase.ESCALATE
+    assert result.highlight_cells == frozenset({0, 1})
+
+
+def test_a_resync_mismatch_highlights_the_mismatched_cells():
+    session = _calibrated_session()
+    session.board = ("X", "X") + session.board[2:]  # session believes 0,1 are taken
+
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=1.0), now=1.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=2.0), now=2.0)
+    result = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=3.0), now=3.0)
+
+    assert result.phase == Phase.ASK_HUMAN
+    assert result.highlight_cells == frozenset({0, 1})
+
+
+def test_a_wrong_cell_mark_highlights_the_stray_cell():
+    session = _calibrated_session()
+    _commit_human_move(session, cell=0)
+    target = session.target_cell
+    stray = next(i for i in range(9) if i != target and session.board[i] is None)
+    wrong = marks(**{f"c{stray}": "marked"})
+
+    session.update(obs(cell_marks=wrong, frame_ts=10.0), now=10.0)
+    result = session.update(obs(cell_marks=wrong, frame_ts=11.0), now=11.0)
+
+    assert result.phase == Phase.ASK_HUMAN
+    assert stray in result.highlight_cells
+
+
+# -- RESYNC nag-loop fixes (live session: smudge -> mismatch loop) ----------
+
+
+def test_an_ambiguous_band_smudge_is_not_a_resync_mismatch():
+    """A faint smudge reads 'ambiguous' — present in neither direction of
+    a confident read, and after a board-lost realignment it flips freely.
+    Only clearly-marked cells count as ink in the absolute re-read."""
+    session = _calibrated_session()
+    smudge = tuple(0.03 if i == 0 else 0.0 for i in range(9))  # between low 0.02 and high 0.05
+
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=1.0), now=1.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=2.0), now=2.0)
+    result = session.update(obs(found=True, stable=True, ratios=smudge, cell_marks=None, frame_ts=3.0), now=3.0)
+
+    assert result.phase == Phase.WAIT_HUMAN  # resumed, no spurious question
+
+
+def test_the_same_resync_mismatch_is_announced_once_not_every_frame():
+    session = _calibrated_session()
+    session.board = ("X",) + session.board[1:]  # session believes top left is taken; page shows nothing
+
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=1.0), now=1.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=2.0), now=2.0)
+    first = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=3.0), now=3.0)
+    assert "doesn't match" in first.message.lower()
+
+    # the same mismatch on the next stable read: no re-announcement
+    second = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=4.0), now=4.0)
+    assert second.phase == Phase.ASK_HUMAN
+    assert second.message is None
+
+    # ... including through a board-lost blip and back
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=5.0), now=5.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=6.0), now=6.0)
+    third = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=7.0), now=7.0)
+    assert third.phase == Phase.ASK_HUMAN
+    assert third.message is None
+
+
+# -- GAME_OVER auto-restart: a fresh blank page starts a new game -----------
+
+
+def _game_over_session() -> Session:
+    session = _calibrated_session()
+    session.board = ("X", "X", None, "O", "O", None, None, None, None)
+    session.baseline = [0.0] * 9
+    final_board = ("X", "X", "X", "O", "O", None, None, None, None)
+    _commit_human_move(session, cell=2, now_start=1.0, ratios=board_ratios(final_board))
+    assert session.phase == Phase.GAME_OVER
+    return session
+
+
+def test_a_blank_page_after_game_over_is_detected_after_two_stable_reads():
+    session = _game_over_session()
+
+    first = session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=10.0))
+    second = session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=11.0))
+
+    assert first is False  # one read could be a hand sweeping the old page away
+    assert second is True
+
+
+def test_a_marked_cell_on_the_new_page_blocks_the_restart():
+    session = _game_over_session()
+
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=10.0)) is False
+    assert session.new_board_detected(obs(ratios=board_ratios(("X",) + (None,) * 8), frame_ts=11.0)) is False
+    # the marked read reset the debounce: the restart needs two NEW blank reads
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=12.0)) is False
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=13.0)) is True
+
+
+def test_new_board_detection_only_arms_at_game_over():
+    session = _calibrated_session()
+
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=1.0)) is False
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=2.0)) is False

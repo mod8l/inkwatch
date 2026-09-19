@@ -60,14 +60,25 @@ from inkwatch.rules import EMPTY_BOARD, Board, Symbol, apply_move, is_draw, winn
 
 DEFAULT_REMINDER_S: tuple[float, float] = (10.0, 20.0)
 DEFAULT_OCCLUSION_REMINDER_S = 15.0  # §9: "Hand stays over the page... after 15 s"
-DEFAULT_INK_LOW = 0.02   # duplicates perception.py's default; kept a literal here so
-DEFAULT_INK_HIGH = 0.05  # this module doesn't need a module-level import of perception.py
+DEFAULT_INK_LOW = 0.025   # duplicates perception.py's default; kept a literal here so
+DEFAULT_INK_HIGH = 0.035  # this module doesn't need a module-level import of perception.py
 
 # How many consecutive stable reads of the same lone ambiguous cell before
 # it counts as "persistent" (shadow/glare/faint pen, §9) rather than a
 # pen mid-stroke (D6, which two reads already covers). Not in PRODUCT.md
 # §12 — no camera-verified value to tune yet; see NOTES.md.
 AMBIGUOUS_ESCALATE_READS = 3
+
+# How long the SAME erased-cell set must persist before the disappearance
+# is real enough to report (§9 'mark erased or removed'). A pencil mark
+# near the grid edge can read low for a few reads while the homography
+# EMA re-settles after the drawing hand leaves — measured sub-second —
+# and warning then soft-locks a game whose mark is plainly still there
+# (found by the scenario simulator: 'A mark seems to have disappeared'
+# one beat after a clean commit, then no move ever evaluated again). A
+# real erasure is permanent, so waiting a second costs nothing. Same
+# not-in-§12 status as AMBIGUOUS_ESCALATE_READS.
+ERASED_PERSIST_S = 1.2
 
 
 class Phase(str, Enum):
@@ -104,6 +115,12 @@ class SessionResult:
     # for the caller to run the actual model call against (M5). Empty
     # outside ESCALATE.
     escalation_cells: frozenset[int]
+    # Cells the overlay should emphasize so the human never has to
+    # decode speech alone: the armed target cell while the agent's mark
+    # is awaited, or every cell involved in an open question (escalation
+    # candidates, wrong-cell marks, resync mismatches). §6.3: spoken
+    # cells are always paired with a visible highlight.
+    highlight_cells: frozenset[int] = frozenset()
 
 
 def _new_marks(cell_marks: tuple[CellMark, ...], board: Board) -> tuple[list[int], list[int], list[int]]:
@@ -166,20 +183,31 @@ class Session:
         # the question: "two_marks" | "ambiguous" | "wrong_cell" | "resync".
         self._ask_context: str | None = None
         self._ask_cells: frozenset[int] = frozenset()
+        # The mismatch set last announced out loud by a resync re-read;
+        # re-speaking the same one every frame is nagging, not recovery.
+        self._ask_announced: frozenset[int] | None = None
+        # GAME_OVER restart debounce: consecutive stable blank-page reads.
+        self._new_board_reads = 0
         # The ratios from the observation that triggered the current
         # ESCALATE, so a later accepted answer has something to commit
         # with — apply_escalation() isn't observation-driven itself.
         self._ask_ratios: tuple[float, ...] | None = None
 
-        # Debounce state (D6-style: two consecutive matching stable reads)
+        # Debounce state (D6-style: consecutive matching stable reads)
         # for each recovery check, kept separate so an ambiguous flicker on
         # one doesn't reset the count on another.
         self._two_marks_pending: frozenset[int] | None = None
         self._ambiguous_pending: int | None = None
         self._ambiguous_streak = 0
-        self._wrong_cell_pending: int | None = None
+        self._wrong_cell_pending: frozenset[int] | None = None
+        self._stray_pending: tuple[frozenset[int], bool] | None = None
+        self._stray_streak = 0
         self._occupied_pending: tuple[frozenset[int], frozenset[int]] | None = None
         self._occupied_warned: tuple[frozenset[int], frozenset[int]] | None = None
+        self._occupied_added_pending: frozenset[int] | None = None
+        self._occupied_added_ack: frozenset[int] | None = None
+        self._erased_candidate: frozenset[int] | None = None
+        self._erased_since: float | None = None
 
     def update(self, observation: Observation, now: float) -> SessionResult:
         if self.phase == Phase.CALIBRATING:
@@ -249,7 +277,37 @@ class Session:
             self._ask_context = None
             self._reset_recovery_debounce()
 
+    def new_board_detected(self, observation: Observation) -> bool:
+        """GAME_OVER only: has a fresh blank page replaced the finished
+        board? Two consecutive stable reads with no clearly-marked cell
+        anywhere (the absolute blank-baseline check RESYNC uses — a
+        leftover smudge reads ambiguous and doesn't block it), so a hand
+        sweeping the old page away can't trigger a restart by itself.
+        The caller (`__main__.py`) owns actually starting the new game:
+        fresh session, fresh per-game escalation budget, fresh log dir."""
+        if self.phase != Phase.GAME_OVER:
+            self._new_board_reads = 0
+            return False
+        if not (observation.found and observation.stable and observation.ratios is not None):
+            self._new_board_reads = 0
+            return False
+        from inkwatch.perception import classify_cells  # same pure-function import as _resync_mismatches
+
+        assert self._blank_baseline is not None
+        marks = classify_cells(list(observation.ratios), self._blank_baseline, self._ink_low, self._ink_high)
+        if any(mark == "marked" for mark in marks):
+            self._new_board_reads = 0
+            return False
+        self._new_board_reads += 1
+        return self._new_board_reads >= 2
+
     def _result(self, cell_marks: tuple[CellMark, ...] | None, message: str | None) -> SessionResult:
+        if self.phase == Phase.WAIT_AGENT_INK and self.target_cell is not None:
+            highlight = frozenset({self.target_cell})
+        elif self.phase in (Phase.ESCALATE, Phase.ASK_HUMAN):
+            highlight = self._ask_cells
+        else:
+            highlight = frozenset()
         return SessionResult(
             phase=self.phase,
             board=self.board,
@@ -259,6 +317,7 @@ class Session:
             confidence=_CONFIDENCE_BY_PHASE.get(self.phase, "accepted"),
             cell_marks=cell_marks,
             escalation_cells=self._ask_cells if self.phase == Phase.ESCALATE else frozenset(),
+            highlight_cells=highlight,
         )
 
     # -- CALIBRATING ---------------------------------------------------
@@ -289,8 +348,14 @@ class Session:
         self._ambiguous_pending = None
         self._ambiguous_streak = 0
         self._wrong_cell_pending = None
+        self._stray_pending = None
+        self._stray_streak = 0
         self._occupied_pending = None
         self._occupied_warned = None
+        self._occupied_added_pending = None
+        self._occupied_added_ack = None
+        self._erased_candidate = None
+        self._erased_since = None
 
     def _enter_board_lost(self) -> None:
         """Silent (§9 gives no spoken line for a bumped/lost page —
@@ -312,7 +377,10 @@ class Session:
     def _handle_resync(self, observation: Observation, now: float) -> str | None:
         """Re-reads all nine cells against the untouched blank baseline
         (`baseline` "is no longer trustworthy", §8) and compares ink
-        presence to what `session.board` believes is there."""
+        presence to what `session.board` believes is there. The same
+        mismatch is announced ONCE — re-speaking it on every stable
+        frame (or after every brief BOARD_LOST blip) is a nagging loop,
+        not a recovery."""
         assert observation.ratios is not None
         mismatches = self._resync_mismatches(observation.ratios)
         if not mismatches:
@@ -321,6 +389,10 @@ class Session:
 
         self.phase = Phase.ASK_HUMAN
         self._ask_context = "resync"
+        self._ask_cells = frozenset(mismatches)
+        if self._ask_cells == self._ask_announced:
+            return None
+        self._ask_announced = self._ask_cells
         names = ", ".join(cell_name(c) for c in mismatches)
         return f"The page doesn't match what I have. Please check {names}."
 
@@ -333,10 +405,16 @@ class Session:
 
         assert self._blank_baseline is not None
         marks = classify_cells(list(ratios), self._blank_baseline, self._ink_low, self._ink_high)
-        return [i for i, mark in enumerate(marks) if (mark != "none") != (self.board[i] is not None)]
+        # Only a clearly-"marked" read counts as ink here: after a
+        # board-lost realignment, marginal cells (a smudge, a faint
+        # pencil trace) flip between "none" and "ambiguous" with a
+        # one-pixel shift, and treating ambiguous as ink turned each
+        # realignment into a spurious mismatch loop (seen live).
+        return [i for i, mark in enumerate(marks) if (mark == "marked") != (self.board[i] is not None)]
 
     def _resume_after_resync(self, now: float) -> str:
         self._ask_context = None
+        self._ask_announced = None
         if self.turn == self.human_symbol:
             self.phase = Phase.WAIT_HUMAN
             return "Okay, I can see the board again."
@@ -370,7 +448,10 @@ class Session:
 
         self.phase = Phase.ASK_HUMAN
         if self._ask_context == "two_marks":
-            return "I see two new marks. Which one is your move?"
+            if len(self._ask_cells) == 2:
+                return "I see two new marks. Which one is your move?"
+            names = ", ".join(cell_name(c) for c in sorted(self._ask_cells))
+            return f"I see new marks in {names}. Which one is your move?"
         cell = next(iter(self._ask_cells))
         return f"I can't tell if you've drawn in {cell_name(cell)}. Can you check the light or the page?"
 
@@ -381,16 +462,45 @@ class Session:
         marked, ambiguous, occupied_changed = _new_marks(observation.cell_marks, self.board)
         erased = self._erased_cells(observation.ratios)
 
-        if erased or occupied_changed:
-            return self._check_occupied_drift(erased, occupied_changed)
+        if erased:
+            # §9's erased-mark warning is BLOCKING (pause until the page
+            # matches again), so it must not fire on sub-second settling
+            # artifacts — the same set has to persist (ERASED_PERSIST_S).
+            if self._erased_persistent(erased, occupied_changed, now):
+                return self._check_occupied_drift(erased, occupied_changed)
+            return None
+        self._erased_candidate = None
+        self._erased_since = None
         self._occupied_pending = None
         self._occupied_warned = None
+        if occupied_changed:
+            # §9's occupied-cell warning must not become a soft-lock: the
+            # scribble is permanent (paper can't un-ink), so after the
+            # warning the drift is ACKNOWLEDGED and normal evaluation
+            # goes on with it present (the next commit's baseline absorbs
+            # it, D7). A vanished mark (erased, above) stays blocking —
+            # the spec pauses the game until the page matches again.
+            blocks, message = self._occupied_added_warning(occupied_changed)
+            if blocks:
+                return message
+        else:
+            self._occupied_added_pending = None
+            self._occupied_added_ack = None
 
-        if len(marked) >= 2:
-            return self._check_two_marks(marked, observation.ratios)
+        if len(marked) + len(ambiguous) >= 2:
+            # Two clear marks, a clear mark plus a shadow/ambiguous cell,
+            # or two ambiguous cells: more than one candidate is §9's
+            # "which one is your move?" question regardless of which band
+            # each candidate fell in — escalate over every cell in doubt
+            # rather than wait silently for a cleaner read that a shadow
+            # will never produce.
+            self._pending_cell = None
+            self._ambiguous_pending = None
+            self._ambiguous_streak = 0
+            return self._check_two_marks(marked + ambiguous, observation.ratios)
         self._two_marks_pending = None
 
-        if len(marked) == 1 and not ambiguous:
+        if len(marked) == 1:
             self._ambiguous_pending = None
             self._ambiguous_streak = 0
             candidate = marked[0]
@@ -402,7 +512,7 @@ class Session:
             return self._commit(candidate, self.human_symbol, observation.ratios, now)
         self._pending_cell = None
 
-        if len(ambiguous) == 1 and not marked:
+        if len(ambiguous) == 1:
             return self._check_ambiguous(ambiguous[0], observation.ratios)
         self._ambiguous_pending = None
         self._ambiguous_streak = 0
@@ -420,13 +530,29 @@ class Session:
         marked, ambiguous, occupied_changed = _new_marks(observation.cell_marks, self.board)
         erased = self._erased_cells(observation.ratios)
 
-        if erased or occupied_changed:
-            return self._check_occupied_drift(erased, occupied_changed)
+        if erased:
+            # §9's erased-mark warning is BLOCKING (pause until the page
+            # matches again), so it must not fire on sub-second settling
+            # artifacts — the same set has to persist (ERASED_PERSIST_S).
+            if self._erased_persistent(erased, occupied_changed, now):
+                return self._check_occupied_drift(erased, occupied_changed)
+            return None
+        self._erased_candidate = None
+        self._erased_since = None
         self._occupied_pending = None
         self._occupied_warned = None
+        if occupied_changed:
+            blocks, message = self._occupied_added_warning(occupied_changed)
+            if blocks:
+                return message
+        else:
+            self._occupied_added_pending = None
+            self._occupied_added_ack = None
 
         if marked == [self.target_cell] and not ambiguous:
             self._wrong_cell_pending = None
+            self._stray_pending = None
+            self._stray_streak = 0
             if self._pending_cell != self.target_cell:
                 self._pending_cell = self.target_cell
                 return None
@@ -436,9 +562,24 @@ class Session:
             return self._commit(self.target_cell, self.agent_symbol, observation.ratios, now)
         self._pending_cell = None
 
-        if len(marked) == 1 and marked[0] != self.target_cell and not ambiguous:
-            return self._check_wrong_cell(marked[0])
+        strays = [c for c in marked if c != self.target_cell]
+        if strays:
+            # Clear ink anywhere but the armed cell — the human drew the
+            # agent's mark somewhere else, or added an extra one. One or
+            # several, this is §9's "wrong cell" ask, not a silent wait.
+            self._stray_pending = None
+            self._stray_streak = 0
+            return self._check_wrong_cell(strays)
         self._wrong_cell_pending = None
+
+        if ambiguous:
+            # Noise around (or instead of) the armed cell's ink: brief is
+            # a pen mid-stroke and just waits (the O3 reminder covers the
+            # silence); persistent is §9's shadow/glare and gets a spoken
+            # ask after a streak rather than stalling the game.
+            return self._check_stray_noise(ambiguous, target_marked=self.target_cell in marked)
+        self._stray_pending = None
+        self._stray_streak = 0
         return None
 
     def _maybe_remind(self, now: float) -> str | None:
@@ -474,7 +615,29 @@ class Session:
         assert self.baseline is not None
         return [i for i in range(9) if self.board[i] is not None and self.baseline[i] - ratios[i] >= self._ink_low]
 
+    def _erased_persistent(self, erased: list[int], occupied_changed: list[int], now: float) -> bool:
+        """True only when the SAME erased-cell set has been there on every
+        stable read for ERASED_PERSIST_S. The disappear-warning is
+        blocking, so it must outlive homography re-settling after the
+        drawing hand leaves (sub-second, measured) — a real erasure is
+        permanent and can afford to wait. The drift check's own two-read
+        debounce is primed while persistence builds, so the warning lands
+        on the first read past the window, not one read later."""
+        candidate = frozenset(erased)
+        if candidate != self._erased_candidate:
+            self._erased_candidate = candidate
+            self._erased_since = now
+            self._occupied_pending = (candidate, frozenset(occupied_changed))
+            return False
+        return now - self._erased_since >= ERASED_PERSIST_S
+
     def _check_occupied_drift(self, erased: list[int], occupied_changed: list[int]) -> str | None:
+        """A committed mark losing ink (§9 'mark erased or removed'):
+        warned once per drift set (two-read debounce, speak-once) and
+        BLOCKING — the game pauses until the page matches state again.
+        Added ink in an occupied cell is a different case with different
+        recovery (`_occupied_added_warning`): it warns once and lets the
+        game go on."""
         candidate = (frozenset(erased), frozenset(occupied_changed))
         if candidate != self._occupied_pending:
             self._occupied_pending = candidate
@@ -485,14 +648,38 @@ class Session:
             return None  # already said it; don't repeat every frame while it persists
         self._occupied_warned = candidate
 
-        if erased:
-            return f"A mark seems to have disappeared from {cell_name(erased[0])}."
-        if len(occupied_changed) == 1:
-            return f"{cell_name(occupied_changed[0]).capitalize()} is already taken. Please draw in an empty cell."
-        return "Those cells are already taken. Please draw in an empty cell."
+        return f"A mark seems to have disappeared from {cell_name(erased[0])}."
 
-    def _check_two_marks(self, marked: list[int], ratios: tuple[float, ...]) -> str | None:
-        candidate = frozenset(marked)
+    def _occupied_added_warning(self, occupied_changed: list[int]) -> tuple[bool, str | None]:
+        """Added ink in occupied cells (§9 'draws in an occupied cell'):
+        the warning is spoken ONCE per drift set (two-read debounce,
+        like every recovery check), then the set is acknowledged and
+        evaluation goes on with the extra ink present — it's paper, it
+        can't be un-inked, and blocking until it cleared soft-locked the
+        game (found by the scenario simulator: after the warning no
+        further move ever evaluated). Returns (blocks, message): blocks
+        is True while a not-yet-acknowledged set is being debounced, and
+        on the warning frame itself."""
+        candidate = frozenset(occupied_changed)
+        if candidate == self._occupied_added_ack:
+            return False, None
+        if candidate != self._occupied_added_pending:
+            self._occupied_added_pending = candidate
+            self._pending_cell = None
+            return True, None
+        self._occupied_added_pending = None
+        self._occupied_added_ack = candidate
+        if len(candidate) == 1:
+            return True, f"{cell_name(next(iter(candidate))).capitalize()} is already taken. Please draw in an empty cell."
+        return True, "Those cells are already taken. Please draw in an empty cell."
+
+    def _check_two_marks(self, cells: list[int], ratios: tuple[float, ...]) -> str | None:
+        """§9's "two new marks at once", generalized to any contested
+        read — two clear marks, a clear mark plus an ambiguous one, or
+        two ambiguous cells. Same debounce, same escalation; candidates
+        are every cell in doubt, so the model/human is asked "which of
+        THESE" rather than being trusted to name a cell from nowhere."""
+        candidate = frozenset(cells)
         if candidate != self._two_marks_pending:
             self._two_marks_pending = candidate
             return None
@@ -511,15 +698,48 @@ class Session:
         self._ambiguous_streak = 0
         return self._enter_escalate("ambiguous", frozenset({cell}), ratios)
 
-    def _check_wrong_cell(self, cell: int) -> str | None:
-        if cell != self._wrong_cell_pending:
-            self._wrong_cell_pending = cell
+    def _check_wrong_cell(self, cells: list[int]) -> str | None:
+        candidate = frozenset(cells)
+        if candidate != self._wrong_cell_pending:
+            self._wrong_cell_pending = candidate
             return None
         self._wrong_cell_pending = None
         self.phase = Phase.ASK_HUMAN
         self._ask_context = "wrong_cell"
+        self._ask_cells = candidate
         assert self.target_cell is not None
-        return f"I asked for {cell_name(self.target_cell)}, but I see a mark in {cell_name(cell)}."
+        names = ", ".join(cell_name(c) for c in sorted(candidate))
+        verb = "a mark" if len(candidate) == 1 else "marks"
+        return f"I asked for {cell_name(self.target_cell)}, but I see {verb} in {names}."
+
+    def _check_stray_noise(self, ambiguous: list[int], target_marked: bool) -> str | None:
+        """WAIT_AGENT_INK's persistent-ambiguous case: the armed cell's
+        ink (or the page alone) keeps reading unclear, which a shadow or
+        glare will do forever. Streak-gated like `_check_ambiguous`, then
+        asks out loud — resolving through the page via the same
+        "wrong_cell" ASK_HUMAN path, which commits the armed cell as soon
+        as the read is clean."""
+        candidate = (frozenset(ambiguous), target_marked)
+        if candidate != self._stray_pending:
+            self._stray_pending = candidate
+            self._stray_streak = 1
+            return None
+        self._stray_streak += 1
+        if self._stray_streak < AMBIGUOUS_ESCALATE_READS:
+            return None
+        self._stray_pending = None
+        self._stray_streak = 0
+        self.phase = Phase.ASK_HUMAN
+        self._ask_context = "wrong_cell"
+        self._ask_cells = frozenset(ambiguous)
+        assert self.target_cell is not None
+        names = ", ".join(cell_name(c) for c in sorted(ambiguous))
+        if target_marked:
+            return (
+                f"I can see the {self.agent_symbol} in {cell_name(self.target_cell)}, "
+                f"but something's unclear in {names}. Please check the light or the page."
+            )
+        return f"I can't tell if there's a mark in {names}. Please check the light or the page."
 
     # -- ASK_HUMAN ----------------------------------------------------------
 
@@ -560,8 +780,19 @@ class Session:
         marked, ambiguous, occupied_changed = _new_marks(observation.cell_marks, self.board)
         erased = self._erased_cells(observation.ratios)
 
-        if erased or occupied_changed:
-            return self._check_occupied_drift(erased, occupied_changed)
+        if erased:
+            if self._erased_persistent(erased, occupied_changed, now):
+                return self._check_occupied_drift(erased, occupied_changed)
+            return None
+        self._erased_candidate = None
+        self._erased_since = None
+        if occupied_changed:
+            blocks, message = self._occupied_added_warning(occupied_changed)
+            if blocks:
+                return message
+        else:
+            self._occupied_added_pending = None
+            self._occupied_added_ack = None
 
         if marked == [self.target_cell] and not ambiguous:
             if self._pending_cell != self.target_cell:
@@ -594,6 +825,7 @@ class Session:
         self.baseline = list(ratios)
         self.target_cell = None
         self._ask_context = None
+        self._ask_announced = None
         self._occlusion_since = None
         self._next_occlusion_reminder_at = None
         self._reset_recovery_debounce()

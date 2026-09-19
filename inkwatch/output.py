@@ -50,12 +50,22 @@ def describe_line(line: tuple[int, int, int]) -> str:
     return _LINE_NAMES[line]
 
 
+_ENGINE = None
+
+
 def _speak_pyttsx3(text: str) -> None:
     import pyttsx3  # imported lazily: not needed at all with --no-voice
 
-    engine = pyttsx3.init()
-    engine.say(text)
-    engine.runAndWait()
+    global _ENGINE
+    if _ENGINE is None:
+        # One engine for the process: re-init per utterance costs ~0.5 s
+        # each time and, on the espeak driver, fires a stray ctypes
+        # callback into a garbage-collected engine (the "weakly-referenced
+        # object no longer exists" spam). The only caller is Speaker's
+        # single worker thread, so sharing one engine is safe here.
+        _ENGINE = pyttsx3.init()
+    _ENGINE.say(text)
+    _ENGINE.runAndWait()
 
 
 def _speak_say_command(text: str) -> None:
@@ -138,26 +148,48 @@ def draw_overlay(
     confidence: str = "accepted",
     cell_marks: tuple[str, ...] | None = None,
     debug: bool = False,
+    grid_lines: tuple[tuple[float, ...], tuple[float, ...]] | None = None,
+    highlight_cells: frozenset[int] = frozenset(),
+    target_symbol: str | None = None,
 ) -> None:
     """Draws the §6.5 debug overlay onto `rectified` in place: per-cell
     X/O, a status banner, the spoken text, a confidence-colored border,
-    and a pulsing highlight on the agent's target cell."""
-    from inkwatch.perception import cell_bounds  # local import: avoids a hard cv2 dependency for callers that don't render
+    and a filled, unmissable highlight on the cells the human needs to
+    act on — the agent's armed target (with the symbol to draw, §6.3's
+    spoken-cell/visual-highlight pairing) and every cell involved in an
+    open question. With `grid_lines` (bare-grid boards), cell boxes
+    follow the REAL detected lines rather than perfect thirds."""
+    from inkwatch.perception import DEFAULT_CELL_INSET, cell_bounds, cell_bounds_grid  # local import: keeps rendering optional
 
     size = rectified.shape[0]
     color = _CONFIDENCE_COLOR.get(confidence, (200, 200, 200))
+    bounds = (
+        cell_bounds_grid(grid_lines[0], grid_lines[1], DEFAULT_CELL_INSET, size)
+        if grid_lines is not None
+        else cell_bounds(size)
+    )
 
-    for idx, (x0, y0, x1, y1) in enumerate(cell_bounds(size)):
+    for idx, (x0, y0, x1, y1) in enumerate(bounds):
         pending = cell_marks is not None and cell_marks[idx] != "none" and board[idx] is None
         if idx == target_cell:
             box_color, thickness = (255, 180, 0), 3
-        elif pending:
+        elif pending or idx in highlight_cells:
             # §9 "two new marks at once": both candidate cells need to be
             # visible on the overlay, not just in --debug's per-cell text.
             box_color, thickness = (0, 255, 255), 2
         else:
             box_color, thickness = color, 1
+        if idx in highlight_cells or idx == target_cell:
+            fill = rectified.copy()
+            cv2.rectangle(fill, (x0, y0), (x1, y1), box_color, -1)
+            cv2.addWeighted(fill, 0.22, rectified, 0.78, 0, rectified)
         cv2.rectangle(rectified, (x0, y0), (x1, y1), box_color, thickness)
+        if idx == target_cell and target_symbol is not None:
+            # What to draw, where — big enough to read from the chair.
+            text_size, _ = cv2.getTextSize(target_symbol, cv2.FONT_HERSHEY_SIMPLEX, 3.0, 5)
+            tx = (x0 + x1 - text_size[0]) // 2
+            ty = (y0 + y1 + text_size[1]) // 2
+            cv2.putText(rectified, target_symbol, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 3.0, box_color, 5, cv2.LINE_AA)
         symbol = board[idx]
         if symbol is not None:
             cv2.putText(

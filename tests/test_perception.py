@@ -261,12 +261,12 @@ def test_x_shaped_stroke_is_classified_marked():
         (3, 0.01, "none"),
         (4, 0.015, "none"),
         (5, 0.018, "none"),
-        (6, 0.025, "ambiguous"),
-        (7, 0.03, "ambiguous"),
-        (8, 0.035, "ambiguous"),
-        (0, 0.04, "ambiguous"),
-        (1, 0.045, "ambiguous"),
-        (2, 0.048, "ambiguous"),
+        (6, 0.02, "ambiguous"),
+        (7, 0.022, "ambiguous"),
+        (8, 0.025, "ambiguous"),
+        (0, 0.03, "marked"),
+        (1, 0.04, "marked"),
+        (2, 0.05, "marked"),
         (3, 0.06, "marked"),
         (4, 0.08, "marked"),
         (5, 0.1, "marked"),
@@ -280,8 +280,11 @@ def test_x_shaped_stroke_is_classified_marked():
 def test_twenty_synthetic_marks_classify_correctly(cell, coverage, expected):
     """Stands in for PRODUCT.md M2's '20 manual marks' acceptance check:
     20 marks of known coverage, spread across cells and across the
-    none/ambiguous/marked bands defined by the default thresholds
-    (ink_threshold_low=0.02, ink_threshold_high=0.05 in config.yaml).
+    none/ambiguous/marked bands defined by the measured thresholds
+    (ink_threshold_low=0.025, ink_threshold_high=0.035 in config.yaml,
+    tuned on live recordings; the dilated ink mask shifts measured
+    ratios up ~1.3-3x over raw stroke coverage, which this table's
+    boundary values were re-measured against).
     """
     board = make_synthetic_board(marks={cell: coverage} if coverage else None)
 
@@ -380,3 +383,235 @@ def test_perceiver_classifies_cell_marks_against_the_supplied_baseline():
     assert observation.stable
     assert observation.cell_marks is not None
     assert all(mark == "none" for mark in observation.cell_marks)
+
+
+# -- Hand-drawn board fallback: four solid black corner squares -----------
+#
+# When no ArUco markers decode (a board drawn by hand, no printer and no
+# ruler), BoardTracker falls back to detecting four filled black squares
+# at the grid corners and feeds the same homography path.
+
+
+def make_blob_frame(*, skew: bool = False, omit: set[str] | None = None, grid: bool = False) -> np.ndarray:
+    """A white frame with solid black squares at the known marker spots,
+    optionally with the 3x3 grid drawn between their inner corners."""
+    omit = omit or set()
+    frame = np.full((FRAME_SIZE, FRAME_SIZE, 3), 255, dtype=np.uint8)
+
+    for name, (x, y) in _marker_positions().items():
+        if name in omit:
+            continue
+        cv2.rectangle(frame, (x, y), (x + MARKER_SIDE, y + MARKER_SIDE), (0, 0, 0), -1)
+
+    if grid:
+        bx, by = BOARD_ORIGIN
+        x0, y0 = bx + MARKER_SIDE, by + MARKER_SIDE
+        x1 = bx + BOARD_SIDE - MARKER_SIDE
+        y1 = by + BOARD_SIDE - MARKER_SIDE
+        cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 0), 2)
+        for i in (1, 2):
+            gx = x0 + (x1 - x0) * i // 3
+            gy = y0 + (y1 - y0) * i // 3
+            cv2.line(frame, (gx, y0), (gx, y1), (0, 0, 0), 2)
+            cv2.line(frame, (x0, gy), (x1, gy), (0, 0, 0), 2)
+
+    if skew:
+        src = np.array(
+            [[0, 0], [FRAME_SIZE, 0], [FRAME_SIZE, FRAME_SIZE], [0, FRAME_SIZE]],
+            dtype=np.float32,
+        )
+        dst = np.array(
+            [[60, 40], [FRAME_SIZE - 20, 10], [FRAME_SIZE - 60, FRAME_SIZE - 30], [30, FRAME_SIZE - 50]],
+            dtype=np.float32,
+        )
+        warp = cv2.getPerspectiveTransform(src, dst)
+        frame = cv2.warpPerspective(frame, warp, (FRAME_SIZE, FRAME_SIZE), borderValue=(255, 255, 255))
+
+    return frame
+
+
+def test_four_black_squares_rectify_to_requested_size():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(), now=1.0)
+
+    assert result.found
+    assert result.rectified.shape == (600, 600, 3)
+
+
+def test_black_squares_found_under_perspective_skew():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(skew=True), now=1.0)
+
+    assert result.found
+    assert result.rectified.shape == (600, 600, 3)
+
+
+def test_drawn_grid_lines_do_not_break_square_detection():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(grid=True), now=1.0)
+
+    assert result.found
+
+
+def test_three_black_squares_is_not_a_board():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_blob_frame(omit={"bottom_right"}), now=1.0)
+
+    assert not result.found
+    assert result.rectified is None
+
+
+def test_a_blank_desk_hallucinates_no_board():
+    tracker = BoardTracker(output_size=600)
+    frame = np.full((FRAME_SIZE, FRAME_SIZE, 3), 255, dtype=np.uint8)
+    # one dark object that is not square (a phone lying on the desk)
+    cv2.rectangle(frame, (100, 700), (300, 780), (0, 0, 0), -1)
+    result = tracker.update(frame, now=1.0)
+
+    assert not result.found
+
+
+# -- Bare-grid fallback: a hand-drawn grid with no corner marks at all ----
+#
+# The last rung of the detection ladder: find the grid's own outer lines
+# and intersect them. Must be shadow-tolerant (adaptive thresholding,
+# not a global cutoff) and must never hallucinate a grid from clutter.
+
+
+def make_line_frame(
+    *,
+    skew: bool = False,
+    omit: set[str] | None = None,
+    inner: bool = True,
+    shadow: bool = False,
+) -> np.ndarray:
+    """A white page with the 3x3 grid's lines drawn (bold, hand-style),
+    no corner marks. `omit` drops named outer lines; `shadow` overlays a
+    smooth diagonal shadow gradient; `skew` warps perspective."""
+    omit = omit or set()
+    frame = np.full((FRAME_SIZE, FRAME_SIZE, 3), 255, dtype=np.uint8)
+    bx, by = BOARD_ORIGIN
+    x1, y1 = bx + BOARD_SIDE, by + BOARD_SIDE
+
+    outer = {"left": bx, "right": x1, "top": by, "bottom": y1}
+    for i in range(4):
+        t = i / 3
+        vx = round(bx + BOARD_SIDE * t)
+        hy = round(by + BOARD_SIDE * t)
+        if not inner and i in (1, 2):
+            continue
+        if i in (0, 3):
+            key_v = "left" if i == 0 else "right"
+            key_h = "top" if i == 0 else "bottom"
+            if key_v in omit or key_h in omit:
+                continue
+        cv2.line(frame, (vx, by), (vx, y1), (0, 0, 0), 4)
+        cv2.line(frame, (bx, hy), (x1, hy), (0, 0, 0), 4)
+
+    if shadow:
+        ramp = np.linspace(0.55, 1.0, FRAME_SIZE, dtype=np.float32)
+        gradient = (ramp[None, :] + ramp[:, None]) / 2
+        frame = (frame * gradient[:, :, None]).astype(np.uint8)
+
+    if skew:
+        src = np.array(
+            [[0, 0], [FRAME_SIZE, 0], [FRAME_SIZE, FRAME_SIZE], [0, FRAME_SIZE]],
+            dtype=np.float32,
+        )
+        dst = np.array(
+            [[60, 40], [FRAME_SIZE - 20, 10], [FRAME_SIZE - 60, FRAME_SIZE - 30], [30, FRAME_SIZE - 50]],
+            dtype=np.float32,
+        )
+        warp = cv2.getPerspectiveTransform(src, dst)
+        frame = cv2.warpPerspective(frame, warp, (FRAME_SIZE, FRAME_SIZE), borderValue=(255, 255, 255))
+
+    return frame
+
+
+def test_a_bare_grid_rectifies_to_requested_size():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(), now=1.0)
+
+    assert result.found
+    assert result.rectified.shape == (600, 600, 3)
+
+
+def test_a_bare_grid_is_found_under_perspective_skew():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(skew=True), now=1.0)
+
+    assert result.found
+
+
+def test_a_bare_grid_is_found_under_a_shadow_gradient():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(shadow=True), now=1.0)
+
+    assert result.found
+
+
+def test_a_missing_outer_line_is_not_a_board():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(omit={"right"}), now=1.0)
+
+    assert not result.found
+
+
+def test_two_crossing_lines_alone_are_not_a_board():
+    tracker = BoardTracker(output_size=600)
+    result = tracker.update(make_line_frame(inner=False, omit={"right", "bottom"}), now=1.0)
+
+    assert not result.found
+
+
+def test_grid_detection_is_stable_enough_for_the_stability_gate():
+    """P5 needs N quiet frames: feed the same grid with small simulated
+    measurement jitter and confirm the smoothed rectification settles
+    instead of tripping the motion threshold forever."""
+    tracker = BoardTracker(output_size=600)
+    gate = StabilityGate(stability_frames=8)
+    base = make_line_frame()
+    rng = np.random.default_rng(7)
+
+    stable = False
+    for i in range(30):
+        jitter = rng.normal(0, 0.8, base.shape).astype(np.float32)
+        noisy = np.clip(base.astype(np.float32) + jitter, 0, 255).astype(np.uint8)
+        result = tracker.update(noisy, now=float(i))
+        assert result.found
+        stable, _ = gate.update(result.rectified, markers_visible=True)
+    assert stable
+
+
+# -- Stability gate dropout tolerance (P5, live-recording fix) --------------
+#
+# Real hand-drawn detection flickers a frame or two per dozen. A hard
+# reset per dropout makes 10 consecutive quiet frames unreachable; brief
+# dropouts now pause the count instead of resetting it.
+
+
+def _quiet_frame() -> np.ndarray:
+    return np.full((600, 600, 3), 255, dtype=np.uint8)
+
+
+def test_a_two_frame_dropout_pauses_the_quiet_count_instead_of_resetting():
+    gate = StabilityGate(stability_frames=10)
+
+    for _ in range(8):
+        gate.update(_quiet_frame(), markers_visible=True)
+    assert not gate.update(None, markers_visible=False)[0]
+    assert not gate.update(None, markers_visible=False)[0]  # 2 dropped: pause
+
+    assert gate.update(_quiet_frame(), markers_visible=True)[0] is False  # 9th quiet
+    assert gate.update(_quiet_frame(), markers_visible=True)[0] is True  # 10th: stable
+
+
+def test_a_longer_dropout_still_resets_the_quiet_count():
+    gate = StabilityGate(stability_frames=10)
+
+    for _ in range(8):
+        gate.update(_quiet_frame(), markers_visible=True)
+    for _ in range(3):  # one more than the tolerance: a real occlusion
+        gate.update(None, markers_visible=False)
+
+    assert gate.update(_quiet_frame(), markers_visible=True)[0] is False  # back to 1

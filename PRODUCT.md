@@ -93,7 +93,7 @@ Short, calm, one instruction per utterance. The agent never lectures. When somet
 | ID | Requirement |
 |---|---|
 | P1 | Detect the four ArUco markers and compute a homography every frame; warp the grid to a fixed 600×600 top-down image. |
-| P2 | If fewer than 4 markers are found, reuse the last homography for up to 0.5 s, then enter `BOARD_LOST`. |
+| P2 | If fewer than 4 markers are found, reuse the last homography for up to 1.5 s (`board_lost_hold_s`), then enter `BOARD_LOST`. |
 | P3 | Divide the rectified board into 9 cells; measure ink only in each cell's inner area (inset ~15%) so grid lines don't count. |
 | P4 | Ink measure = fraction of dark pixels after adaptive thresholding, compared against the **accepted baseline** for that cell. |
 | P5 | A frame is **stable** when inter-frame change is below threshold for N consecutive frames (default 10 frames ≈ 0.6 s) and all markers are visible. Only stable frames are evaluated for moves. |
@@ -103,7 +103,7 @@ Short, calm, one instruction per utterance. The agent never lectures. When somet
 ### 7.2 Move detection and confidence
 | ID | Requirement |
 |---|---|
-| D1 | On each stable frame, classify each empty cell's ink delta as `none` (< T_low), `ambiguous` (T_low to T_high), or `marked` (≥ T_high). Defaults: T_low 2%, T_high 5% of inner-cell pixels; calibrated at session start. |
+| D1 | On each stable frame, classify each empty cell's ink delta as `none` (< T_low), `ambiguous` (T_low to T_high), or `marked` (≥ T_high). Defaults: T_low 2.5%, T_high 3.5% of inner-cell pixels (of a once-dilated ink mask — see `NOTES.md`); tuned on live recordings. |
 | D2 | **High confidence** = exactly one empty cell `marked`, zero `ambiguous`, no occupied cell changed, cell is legal for the current turn. Accept immediately. |
 | D3 | **Low confidence** = anything else (zero marks after a long occlusion, two marks, an ambiguous cell, symbol mismatch, change in an occupied cell). |
 | D4 | Low confidence triggers **escalation**: send the rectified board and the current known state to a vision model and ask which single cell, if any, has a new mark. Timeout 3 s. |
@@ -228,7 +228,7 @@ ink_threshold_high: 0.05
 cell_inset: 0.15
 escalation:
   enabled: true           # auto-false if no API key
-  model: google/gemini-flash   # any OpenRouter vision model id
+  model: google/gemini-3.5-flash   # any OpenRouter vision model id
   timeout_s: 3
   max_calls_per_game: 5
 reminder_s: [10, 20]

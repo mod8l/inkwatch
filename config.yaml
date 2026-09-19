@@ -3,12 +3,12 @@ agent_first: false
 voice: true
 stability_frames: 10
 motion_threshold: 2.0     # mean abs pixel diff (0-255) between consecutive rectified frames; below this counts as "quiet" for stability_frames (P5)
-ink_threshold_low: 0.02
-ink_threshold_high: 0.05
+ink_threshold_low: 0.025    # measured on live recordings (NOTES.md): steady-frame drift stays < ~1.6%
+ink_threshold_high: 0.035   # thin pencil marks dilate to ~4-5%; bold marks 8%+
 cell_inset: 0.15
 escalation:
   enabled: true           # auto-false if no API key
-  model: google/gemini-flash   # any OpenRouter vision model id
+  model: google/gemini-3.5-flash   # any OpenRouter vision model id
   timeout_s: 3
   max_calls_per_game: 5
 reminder_s: [10, 20]
@@ -18,6 +18,6 @@ log_dir: sessions/
 
 board:
   marker_dict: DICT_4X4_50
-  marker_ids: [0, 1, 2, 3]   # top-left, top-right, bottom-right, bottom-left
+  marker_ids: [0, 1, 2, 3]   # top-left, top-right, bottom-right, bottom-left (code convention; constants in perception.py)
   rectified_size: 600        # px, per PRODUCT.md P1
-  board_lost_hold_s: 0.5     # per PRODUCT.md P2
+  board_lost_hold_s: 1.5     # per PRODUCT.md P2; ~1s detection dropouts are normal on hand-drawn boards

@@ -160,3 +160,33 @@ def test_the_request_carries_the_key_and_board_state_but_never_a_raw_frame():
     assert "center is X" in text
     image_url = next(part["image_url"]["url"] for part in content if part["type"] == "image_url")
     assert image_url.startswith("data:image/png;base64,")
+
+
+def _client_replying_raw(content) -> httpx.Client:
+    """A model whose `content` is whatever the provider actually sent --
+    including shapes other than a plain string."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_a_list_of_content_parts_is_joined_and_parsed():
+    """Some models return `content` as typed parts, not a string."""
+    escalator = Escalator(client=_client_replying_raw([{"type": "text", "text": "4"}]))
+
+    outcome = escalator.ask(CROP, EMPTY_BOARD, frozenset({4, 5}))
+
+    assert outcome.cell == 4
+    assert outcome.error is None
+
+
+def test_a_non_string_content_is_no_answer_never_a_crash():
+    """Regression: an unexpected content shape used to raise AttributeError
+    in _parse_cell_reply, outside ask()'s try/except -- killing the frame
+    loop mid-game. ask() must never raise."""
+    for content in ({"type": "text", "text": "4"}, 4, None, []):
+        escalator = Escalator(client=_client_replying_raw(content))
+        outcome = escalator.ask(CROP, EMPTY_BOARD, frozenset({4}))
+        assert outcome.cell is None
