@@ -499,6 +499,48 @@ def test_ink_in_an_occupied_cell_warns_and_keeps_the_old_state():
     assert third.message is None
 
 
+def test_occupied_cell_ink_does_not_block_later_moves():
+    """The occupied-cell scribble is permanent on paper — after the
+    warning the game must go on evaluating, not soft-lock (found by the
+    scenario simulator: the drift early-return swallowed every later
+    move)."""
+    session = _calibrated_session()
+    session.board = ("X",) + session.board[1:]
+    session.baseline = [0.0] * 9
+    changed = marks(c0="marked")
+
+    session.update(obs(cell_marks=changed, frame_ts=1.0), now=1.0)
+    warned = session.update(obs(cell_marks=changed, frame_ts=2.0), now=2.0)
+    assert "already taken" in warned.message.lower()
+
+    # the scribble stays; a new move in an empty cell still commits (D6)
+    both = marks(c0="marked", c4="marked")
+    first = session.update(obs(cell_marks=both, frame_ts=3.0), now=3.0)
+    assert first.message is None  # debounce read, not a new warning
+    second = session.update(obs(cell_marks=both, frame_ts=4.0), now=4.0)
+    assert second.message is not None
+    assert "You played center" in second.message
+    assert session.board[4] == "X"
+
+
+def test_a_new_scribble_after_acknowledgement_warns_again():
+    session = _calibrated_session()
+    session.board = ("X", None, None, None, "X", None, None, None, None)
+    session.baseline = [0.0] * 9
+    changed = marks(c0="marked")
+
+    session.update(obs(cell_marks=changed, frame_ts=1.0), now=1.0)
+    session.update(obs(cell_marks=changed, frame_ts=2.0), now=2.0)
+    session.update(obs(cell_marks=changed, frame_ts=3.0), now=3.0)  # acknowledged, silent
+
+    both = marks(c0="marked", c4="marked")  # a second taken cell gets scribbled
+    first = session.update(obs(cell_marks=both, frame_ts=4.0), now=4.0)
+    assert first.message is None
+    warned = session.update(obs(cell_marks=both, frame_ts=5.0), now=5.0)
+    assert warned.message is not None
+    assert "already taken" in warned.message.lower()
+
+
 def test_an_erased_mark_warns_that_it_disappeared():
     session = _calibrated_session()
     session.board = ("X",) + session.board[1:]
@@ -509,11 +551,32 @@ def test_an_erased_mark_warns_that_it_disappeared():
     first = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=1.0), now=1.0)
     assert first.message is None
 
-    second = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=2.0), now=2.0)
+    second = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=2.5), now=2.5)
     assert second.message is not None
     assert "disappeared" in second.message.lower()
     assert "top left" in second.message.lower()
     assert session.board[0] == "X"  # never guesses a removal into a committed change
+
+
+def test_a_briefly_low_read_is_not_yet_an_erasure():
+    """The erased warning is blocking, so it must outlive homography
+    re-settling after the drawing hand leaves: the same low set has to
+    persist before anything is said (found by the scenario simulator —
+    a clean commit reported 'disappeared' one beat later and the game
+    soft-locked)."""
+    session = _calibrated_session()
+    session.board = ("X",) + session.board[1:]
+    session.baseline = [0.05] + [0.0] * 8  # a thin pencil mark: low reads near the edge
+    faded_ratios = (0.02,) + (0.0,) * 8  # a low-but-not-gone read (settling artifact)
+
+    first = session.update(obs(ratios=faded_ratios, cell_marks=marks(), frame_ts=1.0), now=1.0)
+    assert first.message is None
+    second = session.update(obs(ratios=faded_ratios, cell_marks=marks(), frame_ts=1.5), now=1.5)
+    assert second.message is None  # still inside the persistence window
+    # the artifact settles; the mark reads fine again -> nothing happened
+    recovered = (0.05,) + (0.0,) * 8
+    third = session.update(obs(ratios=recovered, cell_marks=marks(), frame_ts=2.0), now=2.0)
+    assert third.message is None
 
 
 # -- M4: ink in the wrong armed cell (§9) --------------------------------
