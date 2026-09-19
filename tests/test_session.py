@@ -850,3 +850,43 @@ def test_the_same_resync_mismatch_is_announced_once_not_every_frame():
     third = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=7.0), now=7.0)
     assert third.phase == Phase.ASK_HUMAN
     assert third.message is None
+
+
+# -- GAME_OVER auto-restart: a fresh blank page starts a new game -----------
+
+
+def _game_over_session() -> Session:
+    session = _calibrated_session()
+    session.board = ("X", "X", None, "O", "O", None, None, None, None)
+    session.baseline = [0.0] * 9
+    final_board = ("X", "X", "X", "O", "O", None, None, None, None)
+    _commit_human_move(session, cell=2, now_start=1.0, ratios=board_ratios(final_board))
+    assert session.phase == Phase.GAME_OVER
+    return session
+
+
+def test_a_blank_page_after_game_over_is_detected_after_two_stable_reads():
+    session = _game_over_session()
+
+    first = session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=10.0))
+    second = session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=11.0))
+
+    assert first is False  # one read could be a hand sweeping the old page away
+    assert second is True
+
+
+def test_a_marked_cell_on_the_new_page_blocks_the_restart():
+    session = _game_over_session()
+
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=10.0)) is False
+    assert session.new_board_detected(obs(ratios=board_ratios(("X",) + (None,) * 8), frame_ts=11.0)) is False
+    # the marked read reset the debounce: the restart needs two NEW blank reads
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=12.0)) is False
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=13.0)) is True
+
+
+def test_new_board_detection_only_arms_at_game_over():
+    session = _calibrated_session()
+
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=1.0)) is False
+    assert session.new_board_detected(obs(ratios=BLANK_RATIOS, frame_ts=2.0)) is False

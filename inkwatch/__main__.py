@@ -246,6 +246,24 @@ def main(argv: list[str] | None = None) -> None:
     logger = SessionLogger(session_dir, "events", enabled=True)
     recorder = _Recorder(session_dir if args.record else None)
 
+    def _start_new_game() -> None:
+        """Fresh game state: a new Session AND a fresh per-game escalation
+        budget, event log, and recording — reusing any of them silently
+        merges two games into one metrics view (and leaves every later
+        game with no model calls once the first game spent the budget).
+        Called by the `n` key and by GAME_OVER's new-board auto-restart."""
+        nonlocal session, escalator, session_dir, logger, recorder, prev_result
+        logger.close()
+        recorder.close()
+        escalator.close()
+        session = _new_session(config, agent_first, ink_low, ink_high)
+        escalator = _make_escalator(config, disabled_by_flag=args.no_escalation)
+        session_dir = _new_session_dir(log_dir)
+        print(f"Logging this game to {session_dir}")
+        logger = SessionLogger(session_dir, "events", enabled=True)
+        recorder = _Recorder(session_dir if args.record else None)
+        prev_result = None
+
     debug = False
     camera_lost_since: float | None = None
     camera_lost_announced = False
@@ -338,6 +356,12 @@ def main(argv: list[str] | None = None) -> None:
 
             prev_result = result
 
+            # A fresh blank page after GAME_OVER starts a new game on its
+            # own — same as the `n` key, minus the keypress.
+            if result.phase == Phase.GAME_OVER and session.new_board_detected(observation):
+                print("New page detected — starting a new game.")
+                _start_new_game()
+
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
@@ -346,21 +370,7 @@ def main(argv: list[str] | None = None) -> None:
             if key == ord("r"):
                 session.force_resync()
             if key == ord("n"):
-                # New game means a fresh Session AND a fresh per-game
-                # escalation budget, event log, and recording — reusing
-                # any of them silently merges two games into one metrics
-                # view (and leaves every later game with no model calls
-                # once the first game spent the budget).
-                logger.close()
-                recorder.close()
-                escalator.close()
-                session = _new_session(config, agent_first, ink_low, ink_high)
-                escalator = _make_escalator(config, disabled_by_flag=args.no_escalation)
-                session_dir = _new_session_dir(log_dir)
-                print(f"Logging this game to {session_dir}")
-                logger = SessionLogger(session_dir, "events", enabled=True)
-                recorder = _Recorder(session_dir if args.record else None)
-                prev_result = None
+                _start_new_game()
     finally:
         speaker.close()
         escalator.close()

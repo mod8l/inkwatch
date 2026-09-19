@@ -263,6 +263,11 @@ A line-level review of the merged code (branch `fix-review-findings`) found five
 - **Side fix:** the `board:` block in `config.yaml` was dead config (never read); `rectified_size` and `board_lost_hold_s` are now wired into `BoardTracker` construction in `__main__.py` (`marker_dict`/`marker_ids` stay code constants — the block now says so).
 - **Would change if:** a future eval game shows a genuinely faint-but-real mark wrongly passing RESYNC (then the ambiguous band needs its own question instead of being ignored).
 
+#### Auto-restart on a fresh page (Gad's ask, day 2)
+
+- **Chosen:** after GAME_OVER, the session watches for a stable, blank board — two consecutive stable reads with no clearly-`marked` cell (the same absolute blank-baseline check RESYNC uses, so a leftover smudge doesn't block it). `__main__.py` then runs the exact `n`-key procedure (fresh session, fresh per-game escalation budget, fresh `sessions/<timestamp>/` log dir — never a merged log).
+- **Why there and not in the state machine:** game lifecycle (log dirs, budgets) is `__main__.py`'s job, not the session's — the session only reports `new_board_detected(observation)`. The two-read debounce means a hand sweeping the old page away mid-frame can't trigger it.
+
 #### Hand-drawn boards: four solid black corner squares as the no-printer fallback — still no model
 
 - **The situation:** Gad has no printer and no ruler, so the printed marker sheet (D1) can't be produced, and precisely-drawn ArUco patterns (6×6 cells of 6 mm) aren't realistically hand-drawable. His first suggestion was "use some object detection model."

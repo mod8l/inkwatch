@@ -175,6 +175,8 @@ class Session:
         # The mismatch set last announced out loud by a resync re-read;
         # re-speaking the same one every frame is nagging, not recovery.
         self._ask_announced: frozenset[int] | None = None
+        # GAME_OVER restart debounce: consecutive stable blank-page reads.
+        self._new_board_reads = 0
         # The ratios from the observation that triggered the current
         # ESCALATE, so a later accepted answer has something to commit
         # with — apply_escalation() isn't observation-driven itself.
@@ -259,6 +261,30 @@ class Session:
             self._enter_resync()
             self._ask_context = None
             self._reset_recovery_debounce()
+
+    def new_board_detected(self, observation: Observation) -> bool:
+        """GAME_OVER only: has a fresh blank page replaced the finished
+        board? Two consecutive stable reads with no clearly-marked cell
+        anywhere (the absolute blank-baseline check RESYNC uses — a
+        leftover smudge reads ambiguous and doesn't block it), so a hand
+        sweeping the old page away can't trigger a restart by itself.
+        The caller (`__main__.py`) owns actually starting the new game:
+        fresh session, fresh per-game escalation budget, fresh log dir."""
+        if self.phase != Phase.GAME_OVER:
+            self._new_board_reads = 0
+            return False
+        if not (observation.found and observation.stable and observation.ratios is not None):
+            self._new_board_reads = 0
+            return False
+        from inkwatch.perception import classify_cells  # same pure-function import as _resync_mismatches
+
+        assert self._blank_baseline is not None
+        marks = classify_cells(list(observation.ratios), self._blank_baseline, self._ink_low, self._ink_high)
+        if any(mark == "marked" for mark in marks):
+            self._new_board_reads = 0
+            return False
+        self._new_board_reads += 1
+        return self._new_board_reads >= 2
 
     def _result(self, cell_marks: tuple[CellMark, ...] | None, message: str | None) -> SessionResult:
         if self.phase == Phase.WAIT_AGENT_INK and self.target_cell is not None:

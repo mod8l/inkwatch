@@ -92,7 +92,7 @@ Cells are named by row (**top / middle / bottom**) and column (**left / center /
 |---|---|---|
 | `q` | Quit | Yes |
 | `d` | Toggle debug overlay (per-cell none/ambiguous/marked) | Yes |
-| `n` | New game (use a fresh sheet) | Yes |
+| `n` | New game (use a fresh sheet). Not needed after a finished game — a fresh blank page is detected and restarts automatically | Yes |
 | `r` | Force a full re-read of the board (RESYNC) | Yes |
 | `y` / spoken answer | Answer the agent's question, if it asks one you can't resolve on the page | Not built — deferred; see `NOTES.md`. Every question the agent can currently ask resolves through the page instead: fix what's on paper and the next stable read confirms or clears it. |
 
