@@ -5,6 +5,7 @@ recordings/*
 !recordings/inkwatch_scenarios.mp4
 assets/*.png
 assets/*.pdf
+the task/
 __pycache__/
 *.pyc
 .venv/
