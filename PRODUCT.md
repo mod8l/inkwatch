@@ -228,7 +228,7 @@ ink_threshold_high: 0.05
 cell_inset: 0.15
 escalation:
   enabled: true           # auto-false if no API key
-  model: google/gemini-flash   # any OpenRouter vision model id
+  model: google/gemini-3.5-flash   # any OpenRouter vision model id
   timeout_s: 3
   max_calls_per_game: 5
 reminder_s: [10, 20]
