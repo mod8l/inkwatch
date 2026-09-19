@@ -551,11 +551,32 @@ def test_an_erased_mark_warns_that_it_disappeared():
     first = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=1.0), now=1.0)
     assert first.message is None
 
-    second = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=2.0), now=2.0)
+    second = session.update(obs(ratios=faded_ratios, cell_marks=clean_marks, frame_ts=2.5), now=2.5)
     assert second.message is not None
     assert "disappeared" in second.message.lower()
     assert "top left" in second.message.lower()
     assert session.board[0] == "X"  # never guesses a removal into a committed change
+
+
+def test_a_briefly_low_read_is_not_yet_an_erasure():
+    """The erased warning is blocking, so it must outlive homography
+    re-settling after the drawing hand leaves: the same low set has to
+    persist before anything is said (found by the scenario simulator —
+    a clean commit reported 'disappeared' one beat later and the game
+    soft-locked)."""
+    session = _calibrated_session()
+    session.board = ("X",) + session.board[1:]
+    session.baseline = [0.05] + [0.0] * 8  # a thin pencil mark: low reads near the edge
+    faded_ratios = (0.02,) + (0.0,) * 8  # a low-but-not-gone read (settling artifact)
+
+    first = session.update(obs(ratios=faded_ratios, cell_marks=marks(), frame_ts=1.0), now=1.0)
+    assert first.message is None
+    second = session.update(obs(ratios=faded_ratios, cell_marks=marks(), frame_ts=1.5), now=1.5)
+    assert second.message is None  # still inside the persistence window
+    # the artifact settles; the mark reads fine again -> nothing happened
+    recovered = (0.05,) + (0.0,) * 8
+    third = session.update(obs(ratios=recovered, cell_marks=marks(), frame_ts=2.0), now=2.0)
+    assert third.message is None
 
 
 # -- M4: ink in the wrong armed cell (§9) --------------------------------

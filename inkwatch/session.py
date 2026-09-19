@@ -69,6 +69,17 @@ DEFAULT_INK_HIGH = 0.035  # this module doesn't need a module-level import of pe
 # §12 — no camera-verified value to tune yet; see NOTES.md.
 AMBIGUOUS_ESCALATE_READS = 3
 
+# How long the SAME erased-cell set must persist before the disappearance
+# is real enough to report (§9 'mark erased or removed'). A pencil mark
+# near the grid edge can read low for a few reads while the homography
+# EMA re-settles after the drawing hand leaves — measured sub-second —
+# and warning then soft-locks a game whose mark is plainly still there
+# (found by the scenario simulator: 'A mark seems to have disappeared'
+# one beat after a clean commit, then no move ever evaluated again). A
+# real erasure is permanent, so waiting a second costs nothing. Same
+# not-in-§12 status as AMBIGUOUS_ESCALATE_READS.
+ERASED_PERSIST_S = 1.2
+
 
 class Phase(str, Enum):
     CALIBRATING = "CALIBRATING"
@@ -195,6 +206,8 @@ class Session:
         self._occupied_warned: tuple[frozenset[int], frozenset[int]] | None = None
         self._occupied_added_pending: frozenset[int] | None = None
         self._occupied_added_ack: frozenset[int] | None = None
+        self._erased_candidate: frozenset[int] | None = None
+        self._erased_since: float | None = None
 
     def update(self, observation: Observation, now: float) -> SessionResult:
         if self.phase == Phase.CALIBRATING:
@@ -341,6 +354,8 @@ class Session:
         self._occupied_warned = None
         self._occupied_added_pending = None
         self._occupied_added_ack = None
+        self._erased_candidate = None
+        self._erased_since = None
 
     def _enter_board_lost(self) -> None:
         """Silent (§9 gives no spoken line for a bumped/lost page —
@@ -448,7 +463,14 @@ class Session:
         erased = self._erased_cells(observation.ratios)
 
         if erased:
-            return self._check_occupied_drift(erased, occupied_changed)
+            # §9's erased-mark warning is BLOCKING (pause until the page
+            # matches again), so it must not fire on sub-second settling
+            # artifacts — the same set has to persist (ERASED_PERSIST_S).
+            if self._erased_persistent(erased, occupied_changed, now):
+                return self._check_occupied_drift(erased, occupied_changed)
+            return None
+        self._erased_candidate = None
+        self._erased_since = None
         self._occupied_pending = None
         self._occupied_warned = None
         if occupied_changed:
@@ -509,7 +531,14 @@ class Session:
         erased = self._erased_cells(observation.ratios)
 
         if erased:
-            return self._check_occupied_drift(erased, occupied_changed)
+            # §9's erased-mark warning is BLOCKING (pause until the page
+            # matches again), so it must not fire on sub-second settling
+            # artifacts — the same set has to persist (ERASED_PERSIST_S).
+            if self._erased_persistent(erased, occupied_changed, now):
+                return self._check_occupied_drift(erased, occupied_changed)
+            return None
+        self._erased_candidate = None
+        self._erased_since = None
         self._occupied_pending = None
         self._occupied_warned = None
         if occupied_changed:
@@ -585,6 +614,22 @@ class Session:
         it needs the raw ratios session already has."""
         assert self.baseline is not None
         return [i for i in range(9) if self.board[i] is not None and self.baseline[i] - ratios[i] >= self._ink_low]
+
+    def _erased_persistent(self, erased: list[int], occupied_changed: list[int], now: float) -> bool:
+        """True only when the SAME erased-cell set has been there on every
+        stable read for ERASED_PERSIST_S. The disappear-warning is
+        blocking, so it must outlive homography re-settling after the
+        drawing hand leaves (sub-second, measured) — a real erasure is
+        permanent and can afford to wait. The drift check's own two-read
+        debounce is primed while persistence builds, so the warning lands
+        on the first read past the window, not one read later."""
+        candidate = frozenset(erased)
+        if candidate != self._erased_candidate:
+            self._erased_candidate = candidate
+            self._erased_since = now
+            self._occupied_pending = (candidate, frozenset(occupied_changed))
+            return False
+        return now - self._erased_since >= ERASED_PERSIST_S
 
     def _check_occupied_drift(self, erased: list[int], occupied_changed: list[int]) -> str | None:
         """A committed mark losing ink (§9 'mark erased or removed'):
@@ -736,7 +781,11 @@ class Session:
         erased = self._erased_cells(observation.ratios)
 
         if erased:
-            return self._check_occupied_drift(erased, occupied_changed)
+            if self._erased_persistent(erased, occupied_changed, now):
+                return self._check_occupied_drift(erased, occupied_changed)
+            return None
+        self._erased_candidate = None
+        self._erased_since = None
         if occupied_changed:
             blocks, message = self._occupied_added_warning(occupied_changed)
             if blocks:
