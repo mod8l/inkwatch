@@ -43,7 +43,9 @@ CORNER_ROLES: dict[str, tuple[int, int]] = {
 
 DEFAULT_DICTIONARY = cv2.aruco.DICT_4X4_50
 DEFAULT_OUTPUT_SIZE = 600
-DEFAULT_HOLD_SECONDS = 0.5
+DEFAULT_HOLD_SECONDS = 1.5  # P2 hold-over; ~1s detection dropouts are normal on
+# hand-drawn boards (measured on a live recording) and 0.5 s turned each one into
+# a BOARD_LOST -> RESYNC -> spurious-mismatch loop
 
 DEFAULT_CELL_INSET = 0.15
 DEFAULT_INK_LOW = 0.02

@@ -172,6 +172,9 @@ class Session:
         # the question: "two_marks" | "ambiguous" | "wrong_cell" | "resync".
         self._ask_context: str | None = None
         self._ask_cells: frozenset[int] = frozenset()
+        # The mismatch set last announced out loud by a resync re-read;
+        # re-speaking the same one every frame is nagging, not recovery.
+        self._ask_announced: frozenset[int] | None = None
         # The ratios from the observation that triggered the current
         # ESCALATE, so a later accepted answer has something to commit
         # with — apply_escalation() isn't observation-driven itself.
@@ -329,7 +332,10 @@ class Session:
     def _handle_resync(self, observation: Observation, now: float) -> str | None:
         """Re-reads all nine cells against the untouched blank baseline
         (`baseline` "is no longer trustworthy", §8) and compares ink
-        presence to what `session.board` believes is there."""
+        presence to what `session.board` believes is there. The same
+        mismatch is announced ONCE — re-speaking it on every stable
+        frame (or after every brief BOARD_LOST blip) is a nagging loop,
+        not a recovery."""
         assert observation.ratios is not None
         mismatches = self._resync_mismatches(observation.ratios)
         if not mismatches:
@@ -339,6 +345,9 @@ class Session:
         self.phase = Phase.ASK_HUMAN
         self._ask_context = "resync"
         self._ask_cells = frozenset(mismatches)
+        if self._ask_cells == self._ask_announced:
+            return None
+        self._ask_announced = self._ask_cells
         names = ", ".join(cell_name(c) for c in mismatches)
         return f"The page doesn't match what I have. Please check {names}."
 
@@ -351,10 +360,16 @@ class Session:
 
         assert self._blank_baseline is not None
         marks = classify_cells(list(ratios), self._blank_baseline, self._ink_low, self._ink_high)
-        return [i for i, mark in enumerate(marks) if (mark != "none") != (self.board[i] is not None)]
+        # Only a clearly-"marked" read counts as ink here: after a
+        # board-lost realignment, marginal cells (a smudge, a faint
+        # pencil trace) flip between "none" and "ambiguous" with a
+        # one-pixel shift, and treating ambiguous as ink turned each
+        # realignment into a spurious mismatch loop (seen live).
+        return [i for i, mark in enumerate(marks) if (mark == "marked") != (self.board[i] is not None)]
 
     def _resume_after_resync(self, now: float) -> str:
         self._ask_context = None
+        self._ask_announced = None
         if self.turn == self.human_symbol:
             self.phase = Phase.WAIT_HUMAN
             return "Okay, I can see the board again."
@@ -679,6 +694,7 @@ class Session:
         self.baseline = list(ratios)
         self.target_cell = None
         self._ask_context = None
+        self._ask_announced = None
         self._occlusion_since = None
         self._next_occlusion_reminder_at = None
         self._reset_recovery_debounce()

@@ -93,7 +93,7 @@ Short, calm, one instruction per utterance. The agent never lectures. When somet
 | ID | Requirement |
 |---|---|
 | P1 | Detect the four ArUco markers and compute a homography every frame; warp the grid to a fixed 600×600 top-down image. |
-| P2 | If fewer than 4 markers are found, reuse the last homography for up to 0.5 s, then enter `BOARD_LOST`. |
+| P2 | If fewer than 4 markers are found, reuse the last homography for up to 1.5 s (`board_lost_hold_s`), then enter `BOARD_LOST`. |
 | P3 | Divide the rectified board into 9 cells; measure ink only in each cell's inner area (inset ~15%) so grid lines don't count. |
 | P4 | Ink measure = fraction of dark pixels after adaptive thresholding, compared against the **accepted baseline** for that cell. |
 | P5 | A frame is **stable** when inter-frame change is below threshold for N consecutive frames (default 10 frames ≈ 0.6 s) and all markers are visible. Only stable frames are evaluated for moves. |

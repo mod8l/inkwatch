@@ -256,6 +256,13 @@ A line-level review of the merged code (branch `fix-review-findings`) found five
 - **Why fix before the camera session:** 1 and 5 would have corrupted the eval numbers M6 exists to produce; 3 was a guaranteed demo-freezer in real lighting; 2 and 4 turn recoverable moments into hangs/crashes.
 - **Tried and rejected:** routing `WAIT_AGENT_INK`'s contested reads through the vision-model escalation like `WAIT_HUMAN`'s — `_resolve_escalate` always commits the human symbol, so it can't resolve an agent-ink read; the page-based wrong-cell ask already covers resolution without new machinery.
 
+#### RESYNC nag loop (live session, day 2): three compounding causes, three fixes
+
+- **What happened:** Gad's second live session calibrated fine, then fell into "The page doesn't match what I have. Please check top left." spoken on every frame, forever. The recording showed the chain: occasional 1–2 s detection dropouts exceeded the 0.5 s P2 hold-over → BOARD_LOST → RESYNC → re-read against the calibration-time blank baseline → a faint smudge in top-left (4.8% ink, dead in the ambiguous band) flipped across the threshold with each realignment → mismatch → ASK_HUMAN → next dropout → loop. Each loop re-spoke the same sentence.
+- **Fixes:** (1) RESYNC announces a given mismatch set once (`_ask_announced`), never re-speaks it — including after a board-lost blip and back; message-less ASK_HUMAN re-entries also no longer log duplicate `"question"` events. (2) P2 hold-over 0.5 s → 1.5 s (`board_lost_hold_s`), because measured hand-drawn dropouts run 1–2 s. (3) The RESYNC absolute re-read counts only clearly-`marked` cells as ink — ambiguous-band cells flip freely with a one-pixel realignment shift and must not block recovery.
+- **Side fix:** the `board:` block in `config.yaml` was dead config (never read); `rectified_size` and `board_lost_hold_s` are now wired into `BoardTracker` construction in `__main__.py` (`marker_dict`/`marker_ids` stay code constants — the block now says so).
+- **Would change if:** a future eval game shows a genuinely faint-but-real mark wrongly passing RESYNC (then the ambiguous band needs its own question instead of being ignored).
+
 #### Hand-drawn boards: four solid black corner squares as the no-printer fallback — still no model
 
 - **The situation:** Gad has no printer and no ruler, so the printed marker sheet (D1) can't be produced, and precisely-drawn ArUco patterns (6×6 cells of 6 mm) aren't realistically hand-drawable. His first suggestion was "use some object detection model."

@@ -811,3 +811,42 @@ def test_a_wrong_cell_mark_highlights_the_stray_cell():
 
     assert result.phase == Phase.ASK_HUMAN
     assert stray in result.highlight_cells
+
+
+# -- RESYNC nag-loop fixes (live session: smudge -> mismatch loop) ----------
+
+
+def test_an_ambiguous_band_smudge_is_not_a_resync_mismatch():
+    """A faint smudge reads 'ambiguous' — present in neither direction of
+    a confident read, and after a board-lost realignment it flips freely.
+    Only clearly-marked cells count as ink in the absolute re-read."""
+    session = _calibrated_session()
+    smudge = tuple(0.03 if i == 0 else 0.0 for i in range(9))  # between low 0.02 and high 0.05
+
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=1.0), now=1.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=2.0), now=2.0)
+    result = session.update(obs(found=True, stable=True, ratios=smudge, cell_marks=None, frame_ts=3.0), now=3.0)
+
+    assert result.phase == Phase.WAIT_HUMAN  # resumed, no spurious question
+
+
+def test_the_same_resync_mismatch_is_announced_once_not_every_frame():
+    session = _calibrated_session()
+    session.board = ("X",) + session.board[1:]  # session believes top left is taken; page shows nothing
+
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=1.0), now=1.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=2.0), now=2.0)
+    first = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=3.0), now=3.0)
+    assert "doesn't match" in first.message.lower()
+
+    # the same mismatch on the next stable read: no re-announcement
+    second = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=4.0), now=4.0)
+    assert second.phase == Phase.ASK_HUMAN
+    assert second.message is None
+
+    # ... including through a board-lost blip and back
+    session.update(obs(found=False, stable=False, ratios=None, cell_marks=None, frame_ts=5.0), now=5.0)
+    session.update(obs(found=True, stable=False, ratios=None, cell_marks=None, frame_ts=6.0), now=6.0)
+    third = session.update(obs(found=True, stable=True, ratios=BLANK_RATIOS, cell_marks=None, frame_ts=7.0), now=7.0)
+    assert third.phase == Phase.ASK_HUMAN
+    assert third.message is None

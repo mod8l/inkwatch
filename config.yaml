@@ -18,6 +18,6 @@ log_dir: sessions/
 
 board:
   marker_dict: DICT_4X4_50
-  marker_ids: [0, 1, 2, 3]   # top-left, top-right, bottom-right, bottom-left
+  marker_ids: [0, 1, 2, 3]   # top-left, top-right, bottom-right, bottom-left (code convention; constants in perception.py)
   rectified_size: 600        # px, per PRODUCT.md P1
-  board_lost_hold_s: 0.5     # per PRODUCT.md P2
+  board_lost_hold_s: 1.5     # per PRODUCT.md P2; ~1s detection dropouts are normal on hand-drawn boards

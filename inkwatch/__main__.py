@@ -33,10 +33,13 @@ from inkwatch.events import Observation, SessionLogger
 from inkwatch.output import Speaker, draw_overlay
 from inkwatch.perception import (
     DEFAULT_CELL_INSET,
+    DEFAULT_HOLD_SECONDS,
     DEFAULT_INK_HIGH,
     DEFAULT_INK_LOW,
     DEFAULT_MOTION_THRESHOLD,
+    DEFAULT_OUTPUT_SIZE,
     DEFAULT_STABILITY_FRAMES,
+    BoardTracker,
     Perceiver,
     StabilityGate,
 )
@@ -195,7 +198,9 @@ def _log_tick(
         _write("start")
     if board_changed:
         _write("commit")
-    if entered_question:
+    if entered_question and result.message:
+        # A re-entry into ASK_HUMAN that re-asked nothing (session.py's
+        # speak-once) must not log a duplicate "question" either.
         _write("question")
     if entered_game_over:
         _write("result")
@@ -217,7 +222,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Could not open camera '{camera}'", file=sys.stderr)
         sys.exit(1)
 
+    board_cfg = config.get("board") or {}
     perceiver = Perceiver(
+        board=BoardTracker(
+            output_size=int(board_cfg.get("rectified_size", DEFAULT_OUTPUT_SIZE)),
+            hold_seconds=float(board_cfg.get("board_lost_hold_s", DEFAULT_HOLD_SECONDS)),
+        ),
         stability=StabilityGate(
             stability_frames=config.get("stability_frames", DEFAULT_STABILITY_FRAMES),
             motion_threshold=config.get("motion_threshold", DEFAULT_MOTION_THRESHOLD),
