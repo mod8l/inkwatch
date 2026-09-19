@@ -269,6 +269,20 @@ def _soft_blob_mask(shape: tuple[int, int], center: tuple[float, float], radii: 
     return cv2.GaussianBlur(mask, (blur | 1, blur | 1), 0)
 
 
+HAND_COLOR = (72, 80, 95)  # skin-ish dark, BGR
+
+
+def _apply_hand(frame: np.ndarray, mask: np.ndarray, opacity: float = 0.85) -> np.ndarray:
+    """An opaque hand: ADDITIVE pull toward the skin color. Multiplicative
+    'shadow' darkening preserves local contrast (paper and line dim
+    together, the grid survives — adaptive threshold still fires); a real
+    hand replaces the light, so lines under it lose their contrast and
+    detection actually drops out."""
+    a = (mask * opacity)[..., None]
+    color = np.array(HAND_COLOR, np.float32)
+    return (frame.astype(np.float32) * (1.0 - a) + color * a).astype(np.uint8)
+
+
 # --------------------------------------------------------------------- scene
 
 
@@ -323,6 +337,7 @@ class Scene:
         self._action: _Action | None = None
         self._pencil_at: tuple[float, float] | None = None  # None = off-screen
         self._shadow: dict | None = None
+        self._hand: dict | None = None
 
     # -- cell helpers -----------------------------------------------------
 
@@ -347,6 +362,23 @@ class Scene:
             draw_s = max(0.5, mark.total / 260.0)  # ~260 px/s hand speed
         self._action = _Action("draw", PENCIL_ENTER_S + draw_s + PENCIL_DWELL_S + PENCIL_EXIT_S, {
             "cell": cell, "mark": mark, "draw_s": draw_s,
+        })
+
+    def scribble(self, cell: int, duration: float = 1.4) -> None:
+        """Dense zigzag over an already-marked cell — §9's 'human draws in
+        an occupied cell'. APPENDS ink (the old mark stays under it), so
+        the cell's delta vs baseline is unmistakably past T_high and,
+        being paper, stays there — the recovery has to live with it."""
+        rng = self.rng
+        x0, y0, x1, y1 = self.cell_boxes[cell]
+        paths = []
+        n_zig = 5
+        for k in range(n_zig):
+            yk = y0 + (k + 1) * (y1 - y0) / (n_zig + 1)
+            paths.append(_wobble_line((x0 + 8, yk), (x1 - 8, y0 + (n_zig - k) * (y1 - y0) / (n_zig + 1)), rng))
+        mark = Mark([_to_raw(p, self.h_inv) for p in paths])
+        self._action = _Action("scribble", PENCIL_ENTER_S + duration + PENCIL_DWELL_S + PENCIL_EXIT_S, {
+            "cell": cell, "mark": mark, "draw_s": duration,
         })
 
     def half_draw_then_finish(self, cell: int, symbol: str, pause_s: float = 1.4) -> None:
@@ -382,7 +414,7 @@ class Scene:
         the stroke fades back to paper (soft mask, slight residue)."""
         self._action = _Action("erase", duration, {"cell": cell, "at": self.cell_center_raw(cell)})
 
-    def shadow(self, cell: int, band: str = "ambiguous") -> None:
+    def shadow(self, cell: int, band: str = "ambiguous", perceiver=None) -> None:
         """A soft shadow settles over an empty cell and stays (persistent
         ambiguous read, §9 'shadow or glare'). Cleared by clear_shadow().
 
@@ -395,12 +427,15 @@ class Scene:
         shadow edge's coverage is CONSTRUCTED, not guessed: the mask is
         built in rectified space as a soft diagonal falloff clipping the
         cell's inner corner, at a few candidate chord lengths, and each is
-        measured IN CONTEXT — a stateful Perceiver over the live scene,
-        noise and converged homography included — first placement landing
-        mid-band wins. Single-frame estimates transfer badly across a
-        band this narrow; in-context measurement is the same spirit as
-        the session's own start-up calibration. `band='marked'` picks a
-        clearly-dark shadow."""
+        measured IN CONTEXT — a Perceiver over the live scene, noise and
+        converged homography included — first placement landing mid-band
+        wins. Pass `perceiver` to calibrate against a specific (already
+        warmed) instance; without one a fresh instance is used and the
+        caller should verify the app's actual reaction (the scenario
+        director strengthens the shadow in a feedback loop if needed).
+        Single-frame estimates transfer badly across a band this narrow;
+        in-context measurement is the same spirit as the session's own
+        start-up calibration. `band='marked'` picks a clearly-dark shadow."""
         from inkwatch.perception import Perceiver
 
         if cell not in (0, 2, 6, 8):
@@ -419,21 +454,30 @@ class Scene:
         # hard enough for the cell's adaptive threshold to fire along it
         yy, xx = np.mgrid[0:DEFAULT_OUTPUT_SIZE, 0:DEFAULT_OUTPUT_SIZE].astype(np.float32)
 
+        # the shadow is LOCAL: the penumbra edge provides the ink, and a
+        # coarse soft falloff (far too gentle to threshold-fire) keeps
+        # the dark side from spilling into neighbors or the grid borders
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        coarse = np.zeros((DEFAULT_OUTPUT_SIZE, DEFAULT_OUTPUT_SIZE), np.float32)
+        cv2.ellipse(coarse, (int(cx), int(cy)), (int((x1 - x0) * 1.5), int((y1 - y0) * 1.5)), 0, 0, 360, 1.0, -1)
+        coarse = cv2.GaussianBlur(coarse, (61, 61), 0)
+        coarse /= coarse.max()
+
         def in_context_deltas(mask: np.ndarray) -> np.ndarray:
             """Median per-cell ink delta of this shadow, measured through
-            a stateful Perceiver on the LIVE scene (noise, converged
-            homography) — single-frame fresh-tracker estimates transfer
-            badly across the narrow ambiguous band."""
-            perceiver = Perceiver()
+            a Perceiver on the LIVE scene (noise, converged homography) —
+            single-frame fresh-tracker estimates transfer badly across
+            the narrow ambiguous band."""
+            local = perceiver if perceiver is not None else Perceiver()
             self._shadow = None
             for _ in range(8):
-                obs = perceiver.observe(self.tick(), None)
+                obs = local.observe(self.tick(), None)
             base = np.array(obs.ratios)
             try:
                 self._shadow = {"mask": mask, "strength": 0.12}
                 samples = []
-                for _ in range(10):
-                    obs = perceiver.observe(self.tick(), None)
+                for _ in range(14):
+                    obs = local.observe(self.tick(), None)
                     samples.append(np.array(obs.ratios))
             finally:
                 self._shadow = None
@@ -444,6 +488,7 @@ class Scene:
             # sigmoid edge along the outward diagonal through the corner
             dist = (xx - corner[0]) * out[0] + (yy - corner[1]) * out[1]
             mask_rect = 1.0 / (1.0 + np.exp(-(dist - chord * 0.5) / w))
+            mask_rect = mask_rect * coarse
             mask = cv2.warpPerspective(mask_rect, self.h_inv, (FRAME_W, FRAME_H))
             deltas = in_context_deltas(mask)
             # clean read: the target cell is in band AND no other cell
@@ -480,7 +525,7 @@ class Scene:
 
     def _step(self, action: _Action) -> None:
         k, d, t = action.kind, action.data, action.t
-        if k == "draw":
+        if k in ("draw", "scribble"):
             enter, draw_s, dwell, exit_ = PENCIL_ENTER_S, d["draw_s"], PENCIL_DWELL_S, PENCIL_EXIT_S
             if t < enter:
                 self._pencil_at = self._enter_from_left(d["mark"].head(0.0), t / enter)
@@ -520,24 +565,22 @@ class Scene:
             cx, cy = d["at"]
             a = 2 * math.pi * t / 1.7
             self._pencil_at = (cx + 6.0 * math.sin(a), cy + 4.0 * math.sin(2 * a + 1.3))
-            # breathing hand shadow hugging the grid border: soft and
-            # weak enough to never ink a cell (a shadow that reads as a
-            # mark would be a different scenario), present enough to
-            # flicker the border-line detection
-            center = (cx + 30 * math.sin(a / 2.3), cy + 18 * math.cos(a / 3.1))
-            mask = _soft_blob_mask((FRAME_H, FRAME_W), center, (150, 190), rng=self.rng)
-            self._shadow = {"mask": mask, "strength": 0.10 + 0.03 * math.sin(a / 1.9), "transient": True}
+            # the resting hand itself: an opaque blob parked over the
+            # grid's inner lines near the pencil — line contrast under it
+            # dies, so detection drops (P6 occluded) for the whole stay
+            center = (cx + 20 * math.sin(a / 2.3), cy + 14 * math.cos(a / 3.1))
+            mask = _soft_blob_mask((FRAME_H, FRAME_W), center, (175, 150), rng=self.rng)
+            self._hand = {"mask": mask, "opacity": 0.85}
         elif k == "bump":
             frac = min(1.0, t / action.duration)
             ease = frac * frac * (3 - 2 * frac)
             f, to = d["from"], d["to"]
             for key in ("dx", "dy", "deg"):
                 self.pose[key] = f[key] + (to[key] - f[key]) * ease
-            # the grabbing hand: a strong, near-opaque shadow covering
-            # most of the frame for the whole shove — the grid stays
-            # covered wherever the pose shift takes it
+            # the grabbing hand: an opaque palm over the page for the
+            # whole shove — grid lines under it lose all contrast
             mask = _soft_blob_mask((FRAME_H, FRAME_W), (FRAME_W * 0.45, FRAME_H * 0.5), (330, 310), rng=self.rng)
-            self._shadow = {"mask": mask, "strength": 0.70, "transient": True}
+            self._hand = {"mask": mask, "opacity": 0.88}
         elif k == "erase":
             at = d["at"]
             wob = 14 * math.sin(2 * math.pi * t / 0.28)
@@ -549,12 +592,22 @@ class Scene:
         if k in ("draw", "half"):
             self.marks[d["cell"]] = d["mark"]
             self.erased.discard(d["cell"])
+        elif k == "scribble":
+            cell = d["cell"]
+            if cell in self.marks:
+                self.marks[cell].paths.extend(d["mark"].paths)
+                self.marks[cell].lengths.extend(d["mark"].lengths)
+                self.marks[cell].total += d["mark"].total
+            else:
+                self.marks[cell] = d["mark"]
+            self.erased.discard(cell)
         elif k == "erase":
             cell = d["cell"]
             self.marks.pop(cell, None)
             self.erased.add(cell)
         if k in ("linger", "bump"):
             self._shadow = None
+            self._hand = None
         self._pencil_at = None
 
     # -- pencil motion helpers --------------------------------------------
@@ -588,7 +641,7 @@ class Scene:
         for cell, mark in self.marks.items():
             mark.draw(world, 1.0)
         action = self._action
-        if action is not None and action.kind in ("draw", "half") and action.data.get("frac"):
+        if action is not None and action.kind in ("draw", "half", "scribble") and action.data.get("frac"):
             action.data["mark"].draw(world, action.data["frac"])
         if action is not None and action.kind == "erase" and action.data.get("erase_frac"):
             cell = action.data["cell"]
@@ -606,12 +659,14 @@ class Scene:
                 # motion smear of a real grab-and-shove: destroys the
                 # line profiles detection relies on (measured: 0/28
                 # frames detected at k=25 through the real pipeline)
-                world = cv2.GaussianBlur(world, (25, 25), 0)
+                world = cv2.GaussianBlur(world, (31, 31), 0)
 
         frame = world
         if self._shadow is not None:
             s = self._shadow
             frame = (frame.astype(np.float32) * (1.0 - s["strength"] * s["mask"][..., None])).astype(np.uint8)
+        if self._hand is not None:
+            frame = _apply_hand(frame, self._hand["mask"], self._hand["opacity"])
         if self._pencil_at is not None:
             _alpha_sprite(frame, self.pencil_sprite, self.pencil_tip, self._pencil_at)
 
