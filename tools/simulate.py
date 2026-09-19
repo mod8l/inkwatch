@@ -34,7 +34,9 @@ import os
 import queue
 import re
 import socketserver
-import subprocess
+# Only ever invoked below with fixed argv lists (fixed local binaries or
+# sys.executable), never a shell string, never untrusted input.
+import subprocess  # nosec B404
 import sys
 import threading
 import time
@@ -173,7 +175,7 @@ class AppProcess:
             cmd.append("--no-voice")
         cmd += extra_args
         env = dict(os.environ, PYTHONUNBUFFERED="1")
-        self.proc = subprocess.Popen(
+        self.proc = subprocess.Popen(  # nosec B603
             cmd, cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
         )
         self.lines: queue.Queue[tuple[float, str]] = queue.Queue()
@@ -272,7 +274,7 @@ class Director:
         if self.record_screen:
             self.audio_target = _find_monitor_source()
             if self.audio_target is not None:
-                self.audio = subprocess.Popen(
+                self.audio = subprocess.Popen(  # nosec B603 B607
                     ["pw-record", "--target", self.audio_target, str(self.out_dir / "audio.wav")],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
@@ -451,6 +453,18 @@ class Director:
         self.server.scene_call(self.scene.shadow, cell, "ambiguous", None, strength)
         self.timeline.add("action", f"shadow over {CELL_NAMES[cell]}")
 
+    def set_shadow_strength(self, strength: float) -> None:
+        self.server.scene_call(self.scene.set_shadow_strength, strength)
+        self.timeline.add("action", f"the shadow deepens ({strength})")
+
+    def shadow_ramp(self, cell: int, s1: float = 0.18, duration: float = 20.0) -> None:
+        """Deepen a calibrated shadow continuously (a cloud moving in)."""
+        self.server.scene_call(self.scene.shadow_ramp, cell, 0.12, s1, duration)
+        self.timeline.add("action", f"shadow over {CELL_NAMES[cell]}, deepening")
+
+    def stop_ramp(self) -> None:
+        self.server.scene_call(self.scene.stop_ramp)
+
     def clear_shadow(self) -> None:
         self.server.scene_call(self.scene.clear_shadow)
         self._pump(0.5)
@@ -537,14 +551,14 @@ def _find_monitor_source() -> str | None:
     -22 dB mean). There is no separate 'monitor' node on this PipeWire
     setup; targeting the sink itself is the way."""
     try:
-        out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5).stdout
+        out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5).stdout  # nosec B603 B607
         data = json.loads(out)
         for obj in data:
             props = obj.get("info", {}).get("props", {})
             if props.get("media.class") == "Audio/Sink":
                 return str(obj["id"])
     except Exception:
-        pass
+        return None
     return None
 
 
@@ -629,7 +643,7 @@ class WindowCapture:
 
     def _resolve(self) -> str | None:
         try:
-            out = subprocess.run(["xwininfo", "-name", self.title], capture_output=True, text=True, timeout=3).stdout
+            out = subprocess.run(["xwininfo", "-name", self.title], capture_output=True, text=True, timeout=3).stdout  # nosec B603 B607
         except Exception:
             return None
         m = re.search(r"Window id: (0x[0-9a-fA-F]+)", out)
@@ -662,7 +676,7 @@ class WindowCapture:
     def _grab(self) -> np.ndarray | None:
         assert self.window_id is not None
         try:
-            rc = subprocess.run(
+            rc = subprocess.run(  # nosec B603 B607
                 ["xwd", "-silent", "-id", self.window_id, "-out", str(self._xwd_tmp)],
                 capture_output=True, timeout=3,
             ).returncode

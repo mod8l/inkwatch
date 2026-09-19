@@ -223,6 +223,23 @@ def run_recovery(d: Director) -> None:
     d.erase(wrong)
     d.check("wrong cell resolved by fixing the page", play_agent_ink(d, target, "B4"))
 
+    d.set_scenario("B4b out of turn", "An X drawn while the agent's O is armed — treated as ink outside the armed cell")
+    if not d.restart_app():
+        return
+    target = play_human_move(d, 4, "B4b setup")
+    if target is None:
+        return
+    wrong = empty_cell_other_than(d, target)
+    d.draw(wrong, "X")  # the human's OWN symbol, while the agent's mark is armed
+    got = d.wait_msg("but I see a mark in", timeout=30)
+    if got:
+        d.say_seen(got[1])
+    ok = got is not None and f"I asked for {CELL_NAMES[target]}" in got[1]
+    d.check("out-of-turn draw is treated as ink outside the armed cell", ok,
+            got[1] if got else "no wrong-cell question")
+    d.erase(wrong)
+    d.check("game resumes once the page is fixed", play_agent_ink(d, target, "B4b"))
+
     d.set_scenario("B5 lingering hand", "Hand stays over the page — patient, then 'Take your time...' (15 s)")
     if not d.restart_app():
         return
@@ -289,29 +306,45 @@ def run_recovery(d: Director) -> None:
     if got:
         d.check("armed agent ink still commits", play_agent_ink(d, target, "B8"))
 
-    d.set_scenario("B9 shadow over a cell", "A shadow parks on a cell — ambiguous reads escalate, then ask")
+    d.set_scenario("B9 shadow over a cell", "A shadow parks on a cell and deepens — ambiguous reads escalate, then ask")
     if not d.restart_app():
         return
     target = play_human_move(d, 4, "B9 setup")
     if target is None or not play_agent_ink(d, target, "B9 setup"):
         return
-    got = None
-    for strength in (0.12, 0.16, 0.20):
-        d.shadow(8, strength=strength)
-        got = d.wait_msg(["check the light or the page", "You played bottom right"], timeout=9)
-        if got and "check the light" in got[0]:
-            d.say_seen(got[1])
-            break
-        if got:
-            d.check("shadow stayed below a full mark", False,
-                    f"shadow read as a committed mark at strength {strength} — the app took it for a move")
-            break
-        d.clear_shadow()  # too weak to register — strengthen and retry
-    else:
-        d.check("persistent shadow escalates to a light/page question", False,
-                "no light-or-page question at any shadow strength")
+
+    # The ambiguous band is ~1% of a cell wide and the sim↔app transfer
+    # gap is ±1-2%, so discrete strengths jump over it (measured live:
+    # nothing at 0.13, committed as a full mark at 0.14). Instead the
+    # shadow deepens CONTINUOUSLY — the sweep must cross the band, and
+    # the app's ambiguous streak gets seconds to fire first.
+    asked = None
+    d.shadow_ramp(8, s1=0.18, duration=22.0)
+    got = d.wait_msg(["check the light or the page", "You played bottom right"], timeout=30)
     if got and "check the light" in got[0]:
-        d.check("persistent shadow escalates to a light/page question", True)
+        asked = got
+        d.say_seen(got[1])
+        d.stop_ramp()
+    elif got:
+        # overshot: the shadow read as ink and D2 committed it (correct
+        # for what the app saw). Restart clean and ramp slower near the
+        # crossing point.
+        d.timeline.add("action", "shadow read as a full mark (D2 correct for it) — restarting, ramping slower")
+        d.check("ramp overshot the band; app committed it per D2 and the scenario recovered", True)
+        d.clear_shadow()
+        if not d.restart_app():
+            return
+        target = play_human_move(d, 4, "B9 retry")
+        if target is None or not play_agent_ink(d, target, "B9 retry"):
+            return
+        d.server.scene_call(d.scene.shadow_ramp, 8, 0.10, 0.14, 30.0)
+        got = d.wait_msg("check the light or the page", timeout=35)
+        if got:
+            asked = got
+            d.say_seen(got[1])
+            d.stop_ramp()
+    d.check("persistent shadow escalates to a light/page question", asked is not None,
+            "no light-or-page question during the deepening sweep")
     d.clear_shadow()
     d._pump(1.0)
     target2 = play_human_move(d, first_empty(d), "B9 resume")

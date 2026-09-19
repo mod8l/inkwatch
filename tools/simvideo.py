@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+# Only ever invoked below with fixed argv lists (ffmpeg/ffprobe), never a
+# shell string, never untrusted input.
+import subprocess  # nosec B404
 import sys
 import wave
 from pathlib import Path
@@ -47,14 +49,14 @@ SILENT_DB = -45.0
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
     if proc.returncode != 0:
         raise RuntimeError(f"command failed: {' '.join(cmd[:6])}...\n{proc.stderr[-2000:]}")
     return proc
 
 
 def _mean_volume_db(path: Path) -> float:
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603 B607
         ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
         capture_output=True, text=True,
     )
@@ -198,25 +200,36 @@ def build_segment(run: str, run_dir: Path, work: Path) -> tuple[Path, float]:
         filters.append(add_text(cur, f"v{step}", tf, x="", y=985, size=30, color="0xffe08a",
                                 start=entry["t"], end=end, center=True))
         cur = f"v{step}"
-    # verdicts flash for 5 s, staggered into lanes so concurrent ones
-    # don't print on top of each other
-    lanes: list[float] = []
+    # verdicts flash for 5 s, in at most 2 lanes; when both lanes are
+    # busy the incoming verdict displaces the older one (cut short) —
+    # never overlapping text
+    planned: list[list] = []
+    lane_free = [0.0, 0.0]
     for entry in verdicts:
+        free = [i for i, f in enumerate(lane_free) if f <= entry["t"]]
+        if free:
+            lane = free[0]
+        else:
+            lane = min(range(2), key=lambda i: lane_free[i])
+            for p in reversed(planned):
+                if p[1] == lane and p[2] > entry["t"]:
+                    p[2] = entry["t"]
+                    break
+        lane_free[lane] = entry["t"] + 5.0
+        planned.append([entry, lane, entry["t"] + 5.0])
+    for entry, lane, end in planned:
         ok = entry["text"].startswith("PASS")
-        lane = next((i for i, free_at in enumerate(lanes) if free_at <= entry["t"]), len(lanes))
-        if lane == len(lanes):
-            lanes.append(0.0)
-        lanes[lane] = entry["t"] + 5.0
         tf = _write_text(work, run, step := step + 1, entry["text"])
         filters.append(add_text(cur, f"v{step}", tf, x="", y=915 + lane * 28, size=26,
                                 color="0x4ade80" if ok else "0xf87171",
-                                start=entry["t"], end=entry["t"] + 5.0, center=True, bold=True))
+                                start=entry["t"], end=end, center=True, bold=True))
         cur = f"v{step}"
-    # human actions, bottom-left, 4 s
-    for entry in actions:
+    # latest human action only, bottom-left, 3 s
+    for i, entry in enumerate(actions):
+        end = min(entry["t"] + 3.0, actions[i + 1]["t"] if i + 1 < len(actions) else entry["t"] + 3.0)
         tf = _write_text(work, run, step := step + 1, f"hand: {entry['text']}")
-        filters.append(add_text(cur, f"v{step}", tf, x="40", y=1040, size=22, color="0x9aa4b0",
-                                start=entry["t"], end=entry["t"] + 4.0))
+        filters.append(add_text(cur, f"v{step}", tf, x="40", y=1030, size=22, color="0x9aa4b0",
+                                start=entry["t"], end=end))
         cur = f"v{step}"
 
     filters.append(f"[{cur}]format=yuv420p[vout]")
@@ -288,7 +301,7 @@ def main() -> int:
         "a simulated human (real page, real pencil) plays against the unmodified app, fed through its documented camera URL",
         4.0,
     ))
-    totals = {"pass": 0, "fail": 0}
+    totals = {"passed": 0, "failed": 0}
     for i, run in enumerate(args.runs):
         run_dir = SIM_ROOT / run
         if not (run_dir / "timeline.json").exists():
@@ -301,9 +314,9 @@ def main() -> int:
         verdicts_path = run_dir / "verdicts.json"
         if verdicts_path.exists():
             for v in json.loads(verdicts_path.read_text()):
-                totals["pass" if v["ok"] else "fail"] += 1
+                totals["passed" if v["ok"] else "failed"] += 1
 
-    verdict_line = f"scenario checks: {totals['pass']} PASS, {totals['fail']} FAIL"
+    verdict_line = f"scenario checks: {totals['passed']} PASS, {totals['failed']} FAIL"
     pieces.append(build_card(WORK, "999_closing", "Every check is the app's real behavior", verdict_line, 3.5))
 
     concat = WORK / "concat.txt"
@@ -311,7 +324,7 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(out)])
-    probe = subprocess.run(
+    probe = subprocess.run(  # nosec B603 B607
         ["ffprobe", "-hide_banner", "-loglevel", "error", "-show_entries", "format=duration,size",
          "-of", "json", str(out)],
         capture_output=True, text=True,

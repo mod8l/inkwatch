@@ -519,6 +519,28 @@ class Scene:
     def clear_shadow(self) -> None:
         self._shadow = None
 
+    def set_shadow_strength(self, strength: float) -> None:
+        """Deepen the EXISTING shadow in place (same geometry, stronger
+        darkening). See shadow_ramp for why this exists."""
+        if self._shadow is not None:
+            self._shadow["strength"] = strength
+
+    def shadow_ramp(self, cell: int, s0: float = 0.12, s1: float = 0.18, duration: float = 20.0) -> None:
+        """Calibrate the shadow geometry once, then deepen it CONTINUOUSLY
+        over `duration` seconds. The ambiguous band is ~1% wide with a
+        ±1-2% sim↔app transfer gap, so discrete strength steps jump over
+        it (measured live: nothing at 0.13, committed as a full mark at
+        0.14); a slow ramp sweeps through it, giving the app's ambiguous
+        streak seconds to fire before the shadow reads as ink."""
+        self.shadow(cell, strength=s0)
+        self._action = _Action("ramp", duration, {"s0": s0, "s1": s1})
+
+    def stop_ramp(self) -> None:
+        """Freeze the ramp where it is (the shadow stays at its current
+        strength — the app is already asking about it)."""
+        if self._action is not None and self._action.kind == "ramp":
+            self._action = None
+
     # -- clock ------------------------------------------------------------
 
     def tick(self, dt: float = 1 / 30) -> np.ndarray:
@@ -603,6 +625,9 @@ class Scene:
             wob = 14 * math.sin(2 * math.pi * t / 0.28)
             self._pencil_at = (at[0] + wob, at[1] + 6 * math.cos(2 * math.pi * t / 0.21))
             d["erase_frac"] = min(1.0, t / (action.duration * 0.8))
+        elif k == "ramp":
+            frac = min(1.0, t / action.duration)
+            self.set_shadow_strength(d["s0"] + (d["s1"] - d["s0"]) * frac)
 
     def _finish(self, action: _Action) -> None:
         k, d = action.kind, action.data
@@ -761,16 +786,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--extract", metavar="SESSION_DIR", help="pull sim assets from a recorded session into recordings/sim_assets/")
     parser.add_argument("--out", default="recordings/sim_assets")
-    parser.add_argument("--demo", action="store_true", help="render a sample strip of frames to /tmp for eyeballing")
     args = parser.parse_args()
     if args.extract:
         extract_assets(Path(args.extract), Path(args.out))
-    if args.demo:
-        scene = Scene(RecordingBackground(), seed=3)
-        scene.draw(6, "X")
-        frames = [scene.tick() for _ in range(75)]
-        for i, f in enumerate(frames[::15]):
-            cv2.imwrite(f"/tmp/sim_demo_{i}.png", f)
 
 
 if __name__ == "__main__":
