@@ -35,7 +35,6 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FEED_POS = (40, 150, 900, 675)  # x, y, w, h
 APP_POS = (1005, 150, 675, 675)
-FFMPEG_STARTUP_S = 0.4  # measured process-spawn-to-first-frame slack
 
 RUN_TITLES = {
     "happy_path": ("Happy path", "calibration → a full game → result + final re-read → auto-restart"),
@@ -135,22 +134,27 @@ def build_segment(run: str, run_dir: Path, work: Path) -> tuple[Path, float]:
     filters.append(f"[0:v]setpts=PTS-STARTPTS+{feed_off:.3f}/TB,fps=30,scale={FEED_POS[2]}:{FEED_POS[3]}[feed]")
 
     next_input = 1
-    screen_path = run_dir / "screen.mkv"
-    geo_path = run_dir / "window_geometry.json"
-    have_screen = screen_path.exists() and geo_path.exists()
-    if have_screen:
-        geo = json.loads(geo_path.read_text())
-        screen_off = (recorders.get("screen_start_wall", t0_wall) + FFMPEG_STARTUP_S - t0_wall) if t0_wall else 0.0
-        inputs += ["-i", str(screen_path)]
+    appwin_path = run_dir / "appwin.mp4"
+    appwin_ts_path = run_dir / "appwin_ts.jsonl"
+    have_appwin = appwin_path.exists() and appwin_ts_path.exists()
+    if have_appwin:
+        appwin_off = 0.0
+        if t0_wall:
+            first = json.loads(appwin_ts_path.read_text().splitlines()[0])
+            appwin_off = first["t"] - t0_wall
+        inputs += ["-i", str(appwin_path)]
         filters.append(
-            f"[{next_input}:v]setpts=PTS-STARTPTS+{screen_off:.3f}/TB,fps=30,"
-            f"crop={geo['w']}:{geo['h']}:{geo['x']}:{geo['y']},"
-            f"scale={APP_POS[2]}:{APP_POS[3]}:force_original_aspect_ratio=decrease,"
+            # appwin frames are already a fixed letterboxed canvas at
+            # capture time — pad straight to the panel size. (A scale with
+            # force_original_aspect_ratio=decrease here renegotiates frame
+            # size mid-graph on this ffmpeg build and kills the pad filter
+            # with "padded dimensions cannot be smaller than input".)
+            f"[{next_input}:v]setpts=PTS-STARTPTS+{appwin_off:.3f}/TB,fps=30,"
             f"pad={APP_POS[2]}:{APP_POS[3]}:(ow-iw)/2:(oh-ih)/2:color=0x101418[app]"
         )
         next_input += 1
     filters.append("[base][feed]overlay=x={}:y={}:eof_action=repeat[v1]".format(*FEED_POS[:2]))
-    if have_screen:
+    if have_appwin:
         filters.append("[v1][app]overlay=x={}:y={}:eof_action=repeat[v2]".format(*APP_POS[:2]))
         cur = "v2"
     else:
@@ -183,7 +187,7 @@ def build_segment(run: str, run_dir: Path, work: Path) -> tuple[Path, float]:
     filters.append(add_text(cur, f"v{step}", tf, x=str(FEED_POS[0]), y=FEED_POS[1] - 32, size=22,
                             color="0x9aa4b0", start=0, end=duration))
     cur = f"v{step}"
-    tf = _write_text(work, run, step := step + 1, "the app, unmodified" if have_screen else "app window not recorded")
+    tf = _write_text(work, run, step := step + 1, "the app, unmodified" if have_appwin else "app window not recorded")
     filters.append(add_text(cur, f"v{step}", tf, x=str(APP_POS[0]), y=APP_POS[1] - 32, size=22,
                             color="0x9aa4b0", start=0, end=duration))
     cur = f"v{step}"
@@ -194,11 +198,17 @@ def build_segment(run: str, run_dir: Path, work: Path) -> tuple[Path, float]:
         filters.append(add_text(cur, f"v{step}", tf, x="", y=985, size=30, color="0xffe08a",
                                 start=entry["t"], end=end, center=True))
         cur = f"v{step}"
-    # verdicts flash for 5 s
+    # verdicts flash for 5 s, staggered into lanes so concurrent ones
+    # don't print on top of each other
+    lanes: list[float] = []
     for entry in verdicts:
         ok = entry["text"].startswith("PASS")
+        lane = next((i for i, free_at in enumerate(lanes) if free_at <= entry["t"]), len(lanes))
+        if lane == len(lanes):
+            lanes.append(0.0)
+        lanes[lane] = entry["t"] + 5.0
         tf = _write_text(work, run, step := step + 1, entry["text"])
-        filters.append(add_text(cur, f"v{step}", tf, x="", y=915, size=26,
+        filters.append(add_text(cur, f"v{step}", tf, x="", y=915 + lane * 28, size=26,
                                 color="0x4ade80" if ok else "0xf87171",
                                 start=entry["t"], end=entry["t"] + 5.0, center=True, bold=True))
         cur = f"v{step}"

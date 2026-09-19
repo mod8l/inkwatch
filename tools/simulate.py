@@ -270,27 +270,19 @@ class Director:
         self.audio = None
         self.recorder_info: dict = {}
         if self.record_screen:
-            self.screen = subprocess.Popen(
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                 "-f", "x11grab", "-framerate", "30", "-video_size", "1920x1080",
-                 "-i", os.environ.get("DISPLAY", ":0") + ".0",
-                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                 str(self.out_dir / "screen.mkv")],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            self.recorder_info["screen_start_wall"] = time.time()
-            audio_target = _find_monitor_source()
-            if audio_target is not None:
+            self.audio_target = _find_monitor_source()
+            if self.audio_target is not None:
                 self.audio = subprocess.Popen(
-                    ["pw-record", "--target", audio_target, str(self.out_dir / "audio.wav")],
+                    ["pw-record", "--target", self.audio_target, str(self.out_dir / "audio.wav")],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
                 self.recorder_info["audio_start_wall"] = time.time()
+            self.win_capture = WindowCapture(self.out_dir)
+            self.win_capture.start()
             time.sleep(1.0)  # let recorders settle before t0
         self.timeline.t0 = time.time()
         self.recorder_info["t0_wall"] = self.timeline.t0
         self.app = AppProcess(self.port, self.app_args, self.out_dir / "app.log", voice=self.voice)
-        self._record_window_geometry()
         return self
 
     def __exit__(self, *exc) -> None:
@@ -299,16 +291,14 @@ class Director:
         self.app.stop()
         self.server.shutdown()
         self.feed.close()
-        if self.screen is not None:
-            self.screen.terminate()
+        if self.record_screen:
+            self.win_capture.stop()
         if self.audio is not None:
             self.audio.terminate()
-        for proc in (self.screen, self.audio):
-            if proc is not None:
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            try:
+                self.audio.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.audio.kill()
         summary = [vars(v) for v in self.verdicts]
         (self.out_dir / "verdicts.json").write_text(json.dumps(summary, indent=1))
         fails = [v for v in self.verdicts if not v.ok]
@@ -457,8 +447,8 @@ class Director:
         self._wait_idle()
         self.timeline.add("action", f"erase {CELL_NAMES[cell]}")
 
-    def shadow(self, cell: int) -> None:
-        self.server.scene_call(self.scene.shadow, cell)
+    def shadow(self, cell: int, strength: float = 0.12) -> None:
+        self.server.scene_call(self.scene.shadow, cell, "ambiguous", None, strength)
         self.timeline.add("action", f"shadow over {CELL_NAMES[cell]}")
 
     def clear_shadow(self) -> None:
@@ -521,29 +511,9 @@ class Director:
         self.new_page()
         self._event_offset = 0
         self.app = AppProcess(self.port, self.app_args, self.out_dir / "app.log", voice=self.voice)
-        self._record_window_geometry()
+        if self.record_screen:
+            self.win_capture.refresh()
         return self.calibrate(timeout=timeout)
-
-    def _record_window_geometry(self) -> None:
-        """Where the app's window sits on the desktop (for the video crop)."""
-        for _ in range(20):
-            try:
-                out = subprocess.run(
-                    ["xwininfo", "-name", "inkwatch"], capture_output=True, text=True, timeout=3
-                ).stdout
-                geo = {}
-                for line in out.splitlines():
-                    for key, pattern in (("x", r"Absolute upper-left X:\s+(\d+)"), ("y", r"Absolute upper-left Y:\s+(\d+)"),
-                                         ("w", r"Width:\s+(\d+)"), ("h", r"Height:\s+(\d+)")):
-                        m = re.search(pattern, line)
-                        if m:
-                            geo[key] = int(m.group(1))
-                if {"x", "y", "w", "h"} <= set(geo):
-                    (self.out_dir / "window_geometry.json").write_text(json.dumps(geo))
-                    return
-            except Exception:
-                pass
-            time.sleep(0.5)
 
     def restart_game(self, timeout: float = 40.0) -> bool:
         """Swap in a blank page and wait for the auto-restart + greeting."""
@@ -576,3 +546,146 @@ def _find_monitor_source() -> str | None:
     except Exception:
         pass
     return None
+
+
+# ------------------------------------------------------------- window capture
+
+
+def _read_xwd(path: Path) -> np.ndarray | None:
+    """Minimal XWD (X11 window dump) reader: 25 big-endian uint32 header
+    fields, the window-name string (inside header_size), the colormap
+    (ncolors × 12 bytes, present even for TrueColor dumps — skipping it
+    is the difference between a board and rainbow noise), then ZPixmap
+    pixels. Returns BGR, or None on anything unusual."""
+    data = path.read_bytes()
+    if len(data) < 100:
+        return None
+    header = np.frombuffer(data[:100], dtype=">u4")
+    header_size, version, fmt, depth, w, h = header[0], header[1], header[2], header[3], header[4], header[5]
+    byte_order, bpp, bytes_per_line, ncolors = header[7], header[11], header[12], header[19]
+    if version != 7 or fmt != 2 or w == 0 or h == 0 or bpp not in (24, 32):
+        return None
+    offset = int(header_size) + int(ncolors) * 12  # colormap follows header+name
+    pixels = np.frombuffer(data, dtype=np.uint8, offset=offset)
+    need = int(bytes_per_line) * int(h)
+    if len(pixels) < need:
+        return None
+    rows = pixels[:need].reshape(int(h), int(bytes_per_line))
+    img = rows[:, : int(w) * (bpp // 8)].reshape(int(h), int(w), bpp // 8)
+    if byte_order == 0:  # LSBFirst: B,G,R,(X) for the usual ff0000/ff00/ff masks
+        bgr = img[..., :3]
+    else:
+        bgr = img[..., -3:][..., ::-1] if bpp == 32 else img[..., ::-1]
+    return np.ascontiguousarray(bgr)
+
+
+class WindowCapture:
+    """The app's own cv2 window, captured frame by frame with xwd.
+
+    Why not x11grab of the desktop: on this Wayland session the app's
+    window lives in XWayland, which is rootless — the X root window is
+    composited by Wayland, so a full-screen x11grab records pure black
+    (verified live). Per-window `xwd -id` reads the window's own backing
+    store and returns the real pixels (~60 dumps/s measured, so 30 fps
+    capture has headroom). Frames are letterboxed onto a fixed canvas
+    (the window resizes itself between the 600x600 overlay and the
+    smaller banner views) and written to appwin.mp4 with per-frame wall
+    times for exact sync with the rest of the footage."""
+
+    CANVAS = (660, 660)
+    # Window chrome above the board: WM titlebar (y 12-47), Qt's own
+    # caption (52-63), Qt toolbar (64-99), white edge (100-104) — measured
+    # row by row on a live dump; board content starts at y 105.
+    CROP = (16, 105, 16, 16)  # left, top, right, bottom px
+
+    def __init__(self, out_dir: Path, title: str = "inkwatch") -> None:
+        self.out_dir = out_dir
+        self.title = title
+        self.window_id: str | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._writer: cv2.VideoWriter | None = None
+        self._ts = None
+        self._xwd_tmp = out_dir / "_win.xwd"
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def refresh(self) -> None:
+        """Drop the current window id (the app was restarted; its window
+        is a new X window). The capture thread re-resolves on its own."""
+        self.window_id = None
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+        if self._writer is not None:
+            self._writer.release()
+        if self._ts is not None:
+            self._ts.close()
+
+    def _resolve(self) -> str | None:
+        try:
+            out = subprocess.run(["xwininfo", "-name", self.title], capture_output=True, text=True, timeout=3).stdout
+        except Exception:
+            return None
+        m = re.search(r"Window id: (0x[0-9a-fA-F]+)", out)
+        return m.group(1) if m else None
+
+    def _run(self) -> None:
+        self._writer = cv2.VideoWriter(
+            str(self.out_dir / "appwin.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), FPS, self.CANVAS
+        )
+        self._ts = (self.out_dir / "appwin_ts.jsonl").open("w")
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            if self.window_id is None:
+                self.window_id = self._resolve()
+                if self.window_id is None:
+                    time.sleep(0.3)
+                    continue
+            frame = self._grab()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            frame = self._letterbox(frame)
+            self._writer.write(frame)
+            self._ts.write(json.dumps({"t": time.time()}) + "\n")
+            self._ts.flush()
+            dt = time.monotonic() - t0
+            if dt < 1.0 / FPS:
+                time.sleep(1.0 / FPS - dt)
+
+    def _grab(self) -> np.ndarray | None:
+        assert self.window_id is not None
+        try:
+            rc = subprocess.run(
+                ["xwd", "-silent", "-id", self.window_id, "-out", str(self._xwd_tmp)],
+                capture_output=True, timeout=3,
+            ).returncode
+        except Exception:
+            return None
+        if rc != 0 or not self._xwd_tmp.exists():
+            return None
+        try:
+            return _read_xwd(self._xwd_tmp)
+        except Exception:
+            return None
+
+    def _letterbox(self, frame: np.ndarray) -> np.ndarray:
+        l, t, r, b = self.CROP
+        h, w = frame.shape[:2]
+        if h > t + b + 50 and w > l + r + 50:
+            frame = frame[t : h - b, l : w - r]
+        h, w = frame.shape[:2]
+        scale = min(self.CANVAS[0] / w, self.CANVAS[1] / h)
+        if abs(scale - 1.0) > 0.02:
+            frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        h, w = frame.shape[:2]
+        canvas = np.full((self.CANVAS[1], self.CANVAS[0], 3), 16, np.uint8)
+        y, x = (self.CANVAS[1] - h) // 2, (self.CANVAS[0] - w) // 2
+        canvas[y : y + h, x : x + w] = frame
+        return canvas

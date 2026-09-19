@@ -38,7 +38,11 @@ OUT_ROOT = Path("recordings/sim")
 
 def first_empty(d: Director, priority=(2, 6, 8, 1, 3, 5, 7, 0, 4)) -> int:
     """First empty cell on the app's own board, in priority order —
-    resume moves must never land on the agent's ink."""
+    resume moves must never land on the agent's ink. The board comes
+    from the app's event log, which is written a beat AFTER the matching
+    stdout line — settle first or a just-committed agent mark is missed
+    (found when the human scribbled over the agent's fresh O)."""
+    d._pump(0.6)
     board = app_board(d)
     return next(c for c in priority if board[c] is None)
 
@@ -110,11 +114,11 @@ def run_happy(d: Director) -> None:
         if result_line:
             break
         # human's turn (the agent's ink was confirmed by 'Got it.' -> WAIT_HUMAN)
+        d._pump(0.9)  # also lets the event log catch up with the stdout line
         board = app_board(d)
         cell = next((c for c in human_plan if board[c] is None), None)
         if cell is None:
             break
-        d._pump(0.9)
         d.draw(cell, "X")
         pat, line = d.wait_msg(["You played", "I win", "It's a draw", "You win"], timeout=35) or (None, None)
         if pat is None:
@@ -291,12 +295,23 @@ def run_recovery(d: Director) -> None:
     target = play_human_move(d, 4, "B9 setup")
     if target is None or not play_agent_ink(d, target, "B9 setup"):
         return
-    d.shadow(8)
-    got = d.wait_msg("check the light or the page", timeout=30)
-    if got:
-        d.say_seen(got[1])
-    d.check("persistent shadow escalates to a light/page question", got is not None,
-            "no light-or-page question for the shadowed cell")
+    got = None
+    for strength in (0.12, 0.16, 0.20):
+        d.shadow(8, strength=strength)
+        got = d.wait_msg(["check the light or the page", "You played bottom right"], timeout=9)
+        if got and "check the light" in got[0]:
+            d.say_seen(got[1])
+            break
+        if got:
+            d.check("shadow stayed below a full mark", False,
+                    f"shadow read as a committed mark at strength {strength} — the app took it for a move")
+            break
+        d.clear_shadow()  # too weak to register — strengthen and retry
+    else:
+        d.check("persistent shadow escalates to a light/page question", False,
+                "no light-or-page question at any shadow strength")
+    if got and "check the light" in got[0]:
+        d.check("persistent shadow escalates to a light/page question", True)
     d.clear_shadow()
     d._pump(1.0)
     target2 = play_human_move(d, first_empty(d), "B9 resume")

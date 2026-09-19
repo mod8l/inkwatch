@@ -431,7 +431,7 @@ class Scene:
         the stroke fades back to paper (soft mask, slight residue)."""
         self._action = _Action("erase", duration, {"cell": cell, "at": self.cell_center_raw(cell)})
 
-    def shadow(self, cell: int, band: str = "ambiguous", perceiver=None) -> None:
+    def shadow(self, cell: int, band: str = "ambiguous", perceiver=None, strength: float = 0.12) -> None:
         """A soft shadow settles over an empty cell and stays (persistent
         ambiguous read, §9 'shadow or glare'). Cleared by clear_shadow().
 
@@ -512,7 +512,7 @@ class Scene:
             # leaves its baseline (a shadow spanning two cells is a
             # different, messier scenario)
             if target[0] <= deltas[cell] <= target[1] and np.max(np.delete(deltas, cell)) < 0.024:
-                self._shadow = {"mask": mask, "strength": 0.12}
+                self._shadow = {"mask": mask, "strength": strength}
                 return
         raise RuntimeError(f"no in-band shadow placement found for cell {cell}")
 
