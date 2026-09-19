@@ -1,6 +1,8 @@
 .env
 sessions/
-recordings/
+# runtime footage stays local — except the one deliverable video
+recordings/*
+!recordings/inkwatch_scenarios.mp4
 assets/*.png
 assets/*.pdf
 __pycache__/
