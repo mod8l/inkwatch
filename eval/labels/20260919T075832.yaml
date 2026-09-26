@@ -1,29 +1,26 @@
-# Ground-truth label for sessions/20260919T075832 — FILL BY WATCHING THE FRAMES.
-# The move cells and frame ranges below were pre-filled from events.jsonl as a
-# LOOKUP AID ONLY: verify every one against the raw frames (that's what makes
-# this ground truth independent of the log being scored), then fill
-# hand_left_frame_ts from the frame where the hand has just cleared the page.
-
+# Ground-truth label for sessions/20260919T075832, written from watching the raw frames.
+# hand_left_frame_ts = frame_ts of the first frame with the hand fully clear of the
+# page after the mark was complete (montage-reviewed per move; see eval/labels/WORKSHEET.md).
 session_id: "20260919T075832"
 true_moves:
-  - cell: 0                      # verify; commit at frame_ts 481241.626 -> watch raw/000282.png .. raw/000294.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 4                      # verify; commit at frame_ts 481246.854 -> watch raw/000439.png .. raw/000451.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 6                      # verify; commit at frame_ts 481253.885 -> watch raw/000650.png .. raw/000662.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 3                      # verify; commit at frame_ts 481260.355 -> watch raw/000844.png .. raw/000856.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 5                      # verify; commit at frame_ts 481264.852 -> watch raw/000979.png .. raw/000991.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 2                      # verify; commit at frame_ts 481269.689 -> watch raw/001124.png .. raw/001136.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 8                      # verify; commit at frame_ts 481281.663 -> watch raw/001483.png .. raw/001495.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 7                      # verify; commit at frame_ts 481286.533 -> watch raw/001629.png .. raw/001641.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-  - cell: 1                      # verify; commit at frame_ts 481289.005 -> watch raw/001703.png .. raw/001715.png
-    hand_left_frame_ts: 0.0        # <-- FILL from the frames
-false_trigger_commits: 0            # <-- VERIFY: any commit with no real mark behind it?
-final_board: [X, X, O, O, O, X, X, O, X]  # from the result event
-notes: "9 moves, 0 questions, complete game (draw)"
+  - cell: 0
+    hand_left_frame_ts: 481241.065   # raw/000277.png
+  - cell: 4
+    hand_left_frame_ts: 481246.492   # raw/000440.png
+  - cell: 6
+    hand_left_frame_ts: 481253.423   # raw/000648.png
+  - cell: 3
+    hand_left_frame_ts: 481259.885   # raw/000842.png
+  - cell: 5
+    hand_left_frame_ts: 481264.387   # raw/000977.png
+  - cell: 2
+    hand_left_frame_ts: 481268.763   # raw/001107.png
+  - cell: 8
+    hand_left_frame_ts: 481280.785   # raw/001469.png
+  - cell: 7
+    hand_left_frame_ts: 481286.162   # raw/001630.png
+  - cell: 1
+    hand_left_frame_ts: 481288.223   # raw/001692.png
+false_trigger_commits: 0   # every commit verified to have a real mark behind it (montages)
+final_board: [X, X, O, O, O, X, X, O, X]
+notes: "complete game (draw); 0 escalations, 0 questions; final board verified on frame 1720"

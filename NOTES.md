@@ -352,23 +352,33 @@ The brief says the bar is directing the tool well and editing sharply. This sect
 
 ### What I delegated
 - Drafting the design documents (`PRODUCT.md`, `ARCHITECTURE.md`, this file's structure, `README.md`) from my direction, then reviewing and editing them.
-- TODO: code generation for which modules, and how it was scoped (e.g. one module at a time against the requirement IDs in `PRODUCT.md`).
+- Module implementation, scoped one milestone at a time against the requirement IDs in `PRODUCT.md` (M1 sheet+rectification through M6 evidence), each module proposed, reviewed, and committed separately.
+- Test authoring against the spec (state machine driven with synthetic observations, perception against synthetic and recorded frames).
+- The scenario simulator: I described the acceptance-test I wanted (every §8/§9 behavior against the unmodified app through its camera URL); the AI designed and built the frame renderer, MJPEG injection, window capture, and verdict harness.
+- Live-debugging iterations: I played and reported symptoms ("it doesn't ask", "it nags", "it misses thin marks"); the AI replayed the recordings, diagnosed, and proposed fixes.
 
 ### What I kept for myself
 - The core framing: perception as event detection, the model only on the low-confidence path, session as the single owner of truth.
 - Every assumption and every cut in scope.
-- Threshold tuning against my actual camera and lighting.
-- TODO: confirm / extend.
+- The physical setup (hand-drawn board, phone-as-webcam) and the call to work around having no printer or second camera.
+- Threshold tuning judgment — I required numbers to come from the recordings, not from the AI's suggestions.
+- Every PR review and merge decision. Nothing reached `main` unreviewed.
 
 ### Where I overrode or rewrote the output
-TODO: specific, honest examples. Format:
 
 | What the AI produced | What was wrong or weak | What I did instead |
 |---|---|---|
-| | | |
+| ArUco-marker hand-drawing template (precise 6×6 cell patterns) | Unworkable without a ruler — I don't have one | Asked for a simpler reference; we landed on black corner squares, then bare-grid line detection (my constraint pushed two extra detection rungs) |
+| "Use an object detection model" for the hand-drawn board | Latency, cost, network dependency, and no pretrained class for hand-drawn grids — a fashionable default | Kept it classical CV (projection profiles + regular-thirds), which the brief prefers to see defended |
+| "Fill in the tuned values with plausible defaults" (implicit in leaving TODOs vague) | Numbers must come from real measurement, per the repo's own rule | Made it replay the recordings and measure: drift ≤1.6%, thin marks ~4-5% dilated, bold marks 8-30% → thresholds 2.5%/3.5% |
+| Simulator video as the deliverable video | The brief's video is "human and page in frame" — a composite doesn't satisfy it | Disclosed the constraint instead (one camera, which is the game camera) and kept the sim as evidence, not as the deliverable |
 
 ### How I checked AI-written code
-TODO: e.g. unit tests written against the spec rather than the implementation, replay test on recorded frames, reading every file before commit.
+- Tests written against the spec and requirement IDs, not the implementation (the decision module's never-loses property is proved exhaustively, not sampled).
+- Replay harness: recorded real games re-run through the pipeline to check changes against the same frames.
+- A full independent code review pass (separate from the author) that found five real bugs before any real-camera session — including a metrics-corrupting event-log bug and a silent game-freeze on mixed reads.
+- Live sessions treated as the real test: every surprising behavior got replayed from the recording and diagnosed from evidence, not argued about.
+- Reading every file and every PR diff before merge; CI green (tests, lockfile, pip-audit, bandit) required on each.
 
 ---
 

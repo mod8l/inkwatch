@@ -176,17 +176,17 @@ Prints the table below with real numbers, straight from what each game's `events
 
 ## Measured results
 
-TODO: fill from recorded eval games (`python -m inkwatch.metrics`, see `eval/README.md`). Targets are in [`PRODUCT.md` §13](PRODUCT.md).
+From `python -m inkwatch.metrics` over the labeled real recordings in `eval/labels/` (hand-written ground truth, watched frame by frame — see `eval/README.md`). **n=2 games so far** (a complete draw and a 7-move unfinished game), both hand-drawn pencil boards filmed with the phone-as-webcam setup; the set grows per `eval/README.md` as more `--record` games are labeled. Session `20260919T081045` was played *before* the thin-mark threshold fix and is the one with the 2 human questions.
 
 | Metric | Target | Measured |
 |---|---|---|
-| Move detection accuracy | ≥ 98% | |
-| False triggers per 10 games | ≤ 1 | |
-| Escalation rate | < 5% of turns | |
-| Human-question rate | < 3% of turns | |
-| Time to detect (p50) | ≤ 1 s | |
-| End-of-game desync | 0 | |
-| Cost per game | ≈ $0 (reported as avg. escalation tokens/game — see `NOTES.md` D-M5.7) | |
+| Move detection accuracy | ≥ 98% | **100.0%** (16/16 moves) |
+| False triggers per 10 games | ≤ 1 | **0.0** |
+| Escalation rate | < 5% of turns | **0.0%** |
+| Human-question rate | < 3% of turns | 12.5% — over target at n=2; both questions came from the pre-fix session's thin pencil marks |
+| Time to detect (p50) | ≤ 1 s | **0.72 s** |
+| End-of-game desync | 0 | **0/1** |
+| Cost per game | ≈ $0 (reported as avg. escalation tokens/game — see `NOTES.md` D-M5.7) | **0 (no escalations)** |
 
 ## Project layout
 
