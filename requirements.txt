@@ -26,7 +26,7 @@ numpy==2.4.6
     #   opencv-contrib-python
 opencv-contrib-python==5.0.0.93
     # via inkwatch (pyproject.toml)
-python-dotenv==1.2.3
+python-dotenv==1.2.4
     # via inkwatch (pyproject.toml)
 pyttsx3==2.99
     # via inkwatch (pyproject.toml)
