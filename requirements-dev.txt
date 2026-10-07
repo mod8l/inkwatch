@@ -36,7 +36,7 @@ pygments==2.21.0
     # via pytest
 pytest==9.1.1
     # via inkwatch (pyproject.toml)
-python-dotenv==1.2.3
+python-dotenv==1.2.4
     # via inkwatch (pyproject.toml)
 pyttsx3==2.99
     # via inkwatch (pyproject.toml)
